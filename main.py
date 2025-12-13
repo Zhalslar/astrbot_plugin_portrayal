@@ -122,6 +122,10 @@ class Relationship(Star):
         画像 @群友 <查询轮数>
         """
         target_id: str = await self.get_at_id(event) or event.get_sender_id()
+        # 当画像at全体成员时，target_id为"all"
+        if target_id == "all":
+            yield event.plain_result("不能At全体成员")
+            return
         nickname, gender = await self.get_nickname(event, target_id)
         contexts, query_rounds = None, None
         if self.contexts_cache and target_id in self.contexts_cache:
