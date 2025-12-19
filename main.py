@@ -1,17 +1,17 @@
 from typing import Any
 
-import astrbot.api.message_components as Comp
-from astrbot import logger
+from astrbot.api import logger
 from astrbot.api.event import filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
+from .utils import get_at_id, get_nickname
 
-@register("astrbot_plugin_portrayal", "Zhalslar", "...", "...")
-class Relationship(Star):
+
+class PortrayalPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.conf = config
@@ -56,7 +56,7 @@ class Relationship(Star):
             payloads = {
                 "group_id": group_id,
                 "message_seq": message_seq,
-                "count": self.conf["per_msg_count"],
+                "count": 200,
                 "reverseOrder": True,
             }
             result: dict = await event.bot.api.call_action(
@@ -95,34 +95,13 @@ class Relationship(Star):
             logger.error(f"LLM 调用失败：{e}")
             return None
 
-    async def get_nickname(
-        self, event: AiocqhttpMessageEvent, user_id: str | int
-    ) -> tuple[str, str]:
-        """获取指定群友的昵称和性别"""
-        all_info = await event.bot.get_group_member_info(
-            group_id=int(event.get_group_id()), user_id=int(user_id)
-        )
-        nickname = all_info.get("card") or all_info.get("nickname")
-        gender = all_info.get("sex")
-        return nickname, gender
-
-    async def get_at_id(self, event: AiocqhttpMessageEvent) -> str | None:
-        return next(
-            (
-                str(seg.qq)
-                for seg in event.get_messages()
-                if (isinstance(seg, Comp.At)) and str(seg.qq) != event.get_self_id()
-            ),
-            None,
-        )
-
     @filter.command("画像")
     async def get_portrayal(self, event: AiocqhttpMessageEvent):
         """
         画像 @群友 <查询轮数>
         """
-        target_id: str = await self.get_at_id(event) or event.get_sender_id()
-        nickname, gender = await self.get_nickname(event, target_id)
+        target_id: str = await get_at_id(event) or event.get_sender_id()
+        nickname, gender = await get_nickname(event, target_id)
         contexts, query_rounds = None, None
         if self.contexts_cache and target_id in self.contexts_cache:
             contexts = self.contexts_cache[target_id]
@@ -146,7 +125,7 @@ class Relationship(Star):
 
         if query_rounds:
             yield event.plain_result(
-                f"已从{query_rounds * self.conf['per_msg_count']}条群消息中获取了{len(contexts)}条{nickname}的消息，正在分析..."
+                f"已从{query_rounds * 200}条群消息中获取了{len(contexts)}条{nickname}的消息，正在分析..."
             )
         else:
             yield event.plain_result(
