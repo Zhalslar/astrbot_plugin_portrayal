@@ -1,7 +1,7 @@
-name: astrbot_plugin_portrayal # 这是你的插件的唯一识别名。
+name: astrbot_plugin_portrayal
 display_name: 人物画像
-desc: 爬取群友的聊天记录，进而用llm分析群友画像  # 插件简短描述
-help:   # 插件的帮助信息
-version: v1.0.5 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: Zhalslar # 作者
-repo: https://github.com/Zhalslar/astrbot_plugin_portrayal # 插件的仓库地址
+desc: 爬取群友的聊天记录，进而用llm分析群友画像
+help: 略
+version: v1.0.5
+author: Zhalslar
+repo: https://github.com/Zhalslar/astrbot_plugin_portrayal

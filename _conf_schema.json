@@ -1,21 +1,25 @@
 {
-    "per_msg_count": {
-        "description": "每轮获取的群消息数量",
-        "type": "int",
-        "hint": "每轮获取这么多的消息，从这些消息中抽取出目标群友的文本消息",
-        "default": 200
-    },
     "max_msg_count": {
-        "description": "总共要获取的好友消息数量",
+        "description": "用于分析的最大消息量(条)",
         "type": "int",
-        "hint": "获取的消息数量到达此值时停止轮询。用于分析的消息量越多，画像越准确，但需要消耗更多时间和Token",
+        "hint": "用于分析的消息量越多，画像越准确，但需要消耗更多时间和Token",
+        "slider": {
+            "min": 100,
+            "max": 1000,
+            "step": 10
+        },
         "default": 500
     },
     "max_query_rounds": {
-        "description": "获取群消息的最大轮数",
+        "description": "获取群消息的最大轮数(轮)",
         "type": "int",
         "hint": "对于不爱说话的人时，轮询再多的消息，Ta的消息也凑不够，当达到最大轮数时，强制停止轮询。此处仅为默认值，输入画像命令时可同时输入查询轮数",
-        "default": 10
+        "slider": {
+            "min": 1,
+            "max": 80,
+            "step": 10
+        },
+        "default": 20
     },
     "system_prompt_template": {
         "description": "系统提示词模板",
