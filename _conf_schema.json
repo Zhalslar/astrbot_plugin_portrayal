@@ -21,6 +21,13 @@
         },
         "default": 20
     },
+    "provider_id": {
+        "description": "用于分析画像的LLM提供商",
+        "hint": "留空或者填写的提供商不存在时，则使用当前正在使用的LLM提供商",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider"
+    },
     "system_prompt_template": {
         "description": "系统提示词模板",
         "type": "text",
