@@ -7,6 +7,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+from astrbot.core.provider.provider import Provider
 
 from .utils import get_at_id, get_nickname_gender
 
@@ -16,43 +17,35 @@ class PortrayalPlugin(Star):
         super().__init__(context)
         self.conf = config
         # 上下文缓存
-        self.contexts_cache: dict[str, list[dict[str, str]]] = {}
+        self.texts_cache: dict[str, list[str]] = {}
 
-    def _build_user_context(
+    def _build_user_texts(
         self, round_messages: list[dict[str, Any]], target_id: str
-    ) -> list[dict[str, str]]:
-        """
-        把指定用户在所有回合里的纯文本消息打包成 openai-style 的 user 上下文。
-        """
-
-        contexts: list[dict[str, str]] = []
+    ) -> list[str]:
+        texts: list[str] = []
 
         for msg in round_messages:
-            # 1. 过滤发送者
             if msg["sender"]["user_id"] != int(target_id):
                 continue
 
-            # 2. 提取并拼接所有 text 片段
-            text_segments = [
+            text = "".join(
                 seg["data"]["text"] for seg in msg["message"] if seg["type"] == "text"
-            ]
-            text = "".join(text_segments).strip()
-            # 3. 仅当真正说了话才保留
-            if text:
-                print(text)
-                contexts.append({"role": "user", "content": text})
+            ).strip()
 
-        return contexts
+            if text:
+                texts.append(text)
+
+        return texts
 
     async def get_msg_contexts(
         self, event: AiocqhttpMessageEvent, target_id: str, max_query_rounds: int
-    ) -> tuple[list[dict], int]:
+    ) -> tuple[list[str], int]:
         """持续获取群聊历史消息直到达到要求"""
         group_id = event.get_group_id()
         query_rounds = 0
         message_seq = 0
-        contexts: list[dict] = []
-        while len(contexts) < self.conf["max_msg_count"]:
+        texts: list[str] = []
+        while len(texts) < self.conf["max_msg_count"]:
             payloads = {
                 "group_id": group_id,
                 "message_seq": message_seq,
@@ -67,27 +60,38 @@ class PortrayalPlugin(Star):
                 break
             message_seq = round_messages[0]["message_id"]
 
-            contexts.extend(self._build_user_context(round_messages, target_id))
+            texts.extend(self._build_user_texts(round_messages, target_id))
             query_rounds += 1
             if query_rounds >= max_query_rounds:
                 break
-        return contexts, query_rounds
+        return texts, query_rounds
 
     async def get_llm_respond(
-        self, nickname: str, gender: str, contexts: list[dict]
+        self, nickname: str, gender: str, texts: list[str]
     ) -> str | None:
         """调用llm回复"""
-        get_using = self.context.get_using_provider()
-        if not get_using:
+        provider = (
+            self.context.get_provider_by_id(self.conf["provider_id"])
+            or self.context.get_using_provider()
+        )
+        if not isinstance(provider, Provider):
+            logger.error("未配置用于文本生成任务的 LLM 提供商")
             return None
         try:
             system_prompt = self.conf["system_prompt_template"].format(
                 nickname=nickname, gender=("他" if gender == "male" else "她")
             )
-            llm_response = await get_using.text_chat(
-                system_prompt=system_prompt,
-                prompt=f"这是 {nickname} 的聊天记录",
-                contexts=contexts,
+            lines = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+            prompt = (
+                f"以下是用户【{nickname}】在群聊中的历史发言记录，按时间顺序排列。\n"
+                f"这些内容仅作为行为分析素材，而非对话。\n\n"
+                f"--- 聊天记录开始 ---\n"
+                f"{lines}\n"
+                f"--- 聊天记录结束 ---\n\n"
+                f"请基于以上内容，对该用户进行画像分析。"
+            )
+            llm_response = await provider.text_chat(
+                system_prompt=system_prompt, prompt=prompt
             )
             return llm_response.completion_text
 
@@ -102,9 +106,9 @@ class PortrayalPlugin(Star):
         """
         target_id: str = get_at_id(event) or event.get_sender_id()
         nickname, gender = await get_nickname_gender(event, target_id)
-        contexts, query_rounds = None, None
-        if self.contexts_cache and target_id in self.contexts_cache:
-            contexts = self.contexts_cache[target_id]
+        texts, query_rounds = None, None
+        if self.texts_cache and target_id in self.texts_cache:
+            texts = self.texts_cache[target_id]
         else:
             # 每轮查询200条消息，200轮查询4w条消息,几乎接近漫游极限
             end_parm = event.message_str.split(" ")[-1]
@@ -115,29 +119,29 @@ class PortrayalPlugin(Star):
             yield event.plain_result(
                 f"正在发起{target_query_rounds}轮查询来获取{nickname}的消息..."
             )
-            contexts, query_rounds = await self.get_msg_contexts(
+            texts, query_rounds = await self.get_msg_contexts(
                 event, target_id, target_query_rounds
             )
-            self.contexts_cache[target_id] = contexts
-        if not contexts:
+            self.texts_cache[target_id] = texts
+        if not texts:
             yield event.plain_result("没有找到该群友的任何消息")
             return
 
         if query_rounds:
             yield event.plain_result(
-                f"已从{query_rounds * 200}条群消息中获取了{len(contexts)}条{nickname}的消息，正在分析..."
+                f"已从{query_rounds * 200}条群消息中获取了{len(texts)}条{nickname}的消息，正在分析..."
             )
         else:
             yield event.plain_result(
-                f"已从缓存中获取了{len(contexts)}条{nickname}的消息，正在分析..."
+                f"已从缓存中获取了{len(texts)}条{nickname}的消息，正在分析..."
             )
 
         try:
-            llm_respond = await self.get_llm_respond(nickname, gender, contexts)
+            llm_respond = await self.get_llm_respond(nickname, gender, texts)
             if llm_respond:
                 url = await self.text_to_image(llm_respond)
                 yield event.image_result(url)
-                del self.contexts_cache[target_id]
+                del self.texts_cache[target_id]
             else:
                 yield event.plain_result("LLM响应为空")
         except Exception as e:
@@ -146,4 +150,4 @@ class PortrayalPlugin(Star):
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
-        self.contexts_cache.clear()
+        self.texts_cache.clear()
