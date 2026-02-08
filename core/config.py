@@ -112,9 +112,11 @@ class PromptEntry(ConfigNode):
     command: str
     content: str
 
+
 class LLMConfig(ConfigNode):
     provider_id: str
     retry_times: int
+
 
 class MessageConfig(ConfigNode):
     default_query_rounds: int
@@ -162,7 +164,7 @@ class PluginConfig(ConfigNode):
 
     def load_builtin_prompts(self) -> None:
         with self.builtin_prompt_file.open("r", encoding="utf-8") as f:
-            data: list[dict[str, Any]] = yaml.safe_load(f)
+            data: list[dict[str, Any]] = yaml.safe_load(f) or []
 
         existed_commands = {e.command for e in self.entries}
         new_items: list[dict[str, Any]] = []
