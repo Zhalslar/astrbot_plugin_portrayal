@@ -112,6 +112,15 @@ class PromptEntry(ConfigNode):
     command: str
     content: str
 
+    def __init__(self, data: dict[str, Any]):
+        super().__init__(data)
+  
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command": self.command,
+            "content": self.content,
+        }
+
 
 class LLMConfig(ConfigNode):
     provider_id: str
@@ -152,39 +161,8 @@ class PluginConfig(ConfigNode):
 
         self.data_dir = StarTools.get_data_dir(self._plugin_name)
         self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
+        self.style_dir = self.plugin_dir / "pillowmd_style"
+        self.cache_dir = self.data_dir / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.builtin_prompt_file = self.plugin_dir / "builtin_prompts.yaml"
 
-        # 加载用户配置
-        self.entries: list[PromptEntry] = [
-            PromptEntry(item) for item in self.entry_storage
-        ]
-        if self.load_builtin_prompt:
-            self.load_builtin_prompts()
-        logger.debug(f"已注册命令：{[e.command for e in self.entries]}")
-
-    def load_builtin_prompts(self) -> None:
-        with self.builtin_prompt_file.open("r", encoding="utf-8") as f:
-            data: list[dict[str, Any]] = yaml.safe_load(f) or []
-
-        existed_commands = {e.command for e in self.entries}
-        new_items: list[dict[str, Any]] = []
-
-        for item in data:
-            if item["command"] in existed_commands:
-                continue
-            self.entry_storage.append(item)
-            new_items.append(item)
-            self.entries.append(PromptEntry(item))
-
-        if new_items:
-            self.save_config()
-            logger.info(
-                f"[{self._plugin_name}] 已补充并保存内置提示词："
-                f"{[item['command'] for item in new_items]}"
-            )
-
-    def match_prompt_by_cmd(self, message: str) -> str | None:
-        """根据命令匹配提示词"""
-        for entry in self.entries:
-            if entry.command == message:
-                return entry.content

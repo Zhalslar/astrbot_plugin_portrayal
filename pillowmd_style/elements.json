@@ -1,0 +1,50 @@
+
+{
+    "enable":true,
+    "background":{
+        "mode": 1,
+        "data": {
+            "left-up": "1.2.200.png",
+            "left": "4.3.200.png",
+            "left-down": "6.2.200.png",
+            "up": "2.3.200.png",
+            "down": "7.3.200.png",
+            "right-up": "3.2.200.png",
+            "right": "5.3.200.png",
+            "right-down": "8.2.200.png",
+
+            "lr-mode": 0,
+            "ud-mode": 0,
+
+            "middle": "9.2.200.png",
+            "middle-mode": 0
+        }
+    },
+    "decorates":{
+        "top":{
+            "left-up": [],
+            "left": [],
+            "left-down": [],
+            "up": [],
+            "down": [],
+            "right-up": [],
+            "right": [],
+            "right-down": [],
+            "middle": []
+        },
+        "bottom":{
+            "left-up": [],
+            "left": [],
+            "left-down": [],
+            "up": [ {
+                "img": "2.aa.png",
+                "mode": 0
+              }],
+            "down": [],
+            "right-up": [],
+            "right": [],
+            "right-down": [],
+            "middle": []
+        }
+    }
+}

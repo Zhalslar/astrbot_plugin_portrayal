@@ -11,7 +11,7 @@ from .core.config import PluginConfig
 from .core.message import MessageManager
 from .core.profile_service import UserProfileService
 from .core.llm import LLMService
-
+from .core.entry import EntryService
 
 class PortrayalPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -19,7 +19,18 @@ class PortrayalPlugin(Star):
         self.cfg = PluginConfig(config, context)
         self.msg = MessageManager(self.cfg)
         self.profile_service = UserProfileService()
+        self.entry_service = EntryService(self.cfg)
         self.llm = LLMService(context, self.cfg)
+        self.style = None
+
+    async def initialize(self):
+        """加载插件时调用"""
+        try:
+            import pillowmd
+
+            self.style = pillowmd.LoadMarkdownStyles(self.cfg.style_dir)
+        except Exception as e:
+            logger.error(f"无法加载pillowmd样式：{e}")
 
     async def terminate(self):
         self.msg.clear_cache()
@@ -35,6 +46,15 @@ class PortrayalPlugin(Star):
             None,
         )
 
+    async def send(self, event: AiocqhttpMessageEvent, message: str):
+        if self.style:
+            img = await self.style.AioRender(text=message, useImageUrl=True)
+            img_path = img.Save(self.cfg.cache_dir)
+            await event.send(event.image_result(str(img_path))) 
+        else:
+            await event.send(event.plain_result(message)) 
+        event.stop_event()
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def get_portrayal(self, event: AiocqhttpMessageEvent):
@@ -42,7 +62,7 @@ class PortrayalPlugin(Star):
         画像 @群友 <查询轮数>
         """
         cmd = event.message_str.partition(" ")[0]
-        prompt = self.cfg.match_prompt_by_cmd(cmd)
+        prompt = self.entry_service.match_prompt_by_cmd(cmd)
         if not prompt:
             return
         target_id = self.get_at_id(event) or event.get_sender_id()
@@ -76,8 +96,25 @@ class PortrayalPlugin(Star):
 
         # ---------- LLM ----------
         try:
-            respond = await self.llm.generate_portrait(result.texts, profile, prompt)
-            yield event.plain_result(respond)
+            content = await self.llm.generate_portrait(result.texts, profile, prompt)
         except Exception as e:
             logger.error(f"LLM 调用失败：{e}")
             yield event.plain_result(f"分析失败：{e}")
+
+        # ---------- 发送 ----------
+        await self.send(event, content)
+
+    @filter.command("画像提示词", alias={"查看画像提示词"})
+    async def get_prompt(
+        self,
+        event: AiocqhttpMessageEvent,
+        command: str | None = None,
+    ):
+        """
+        查看画像提示词 <命令>
+        """
+        text = self.entry_service.view_entry(command)
+        if not text:
+            yield event.plain_result(f"提示词【{command}】不存在")
+            return
+        await self.send(event, text)
