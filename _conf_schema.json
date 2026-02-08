@@ -1,59 +1,95 @@
 {
-    "default_query_rounds": {
-        "description": "获取群消息的默认轮询次数",
-        "type": "int",
-        "hint": "每轮固定获取200条群消息, 此处指定轮询多少次。也可用命令 “画像 @群友 轮数” 可实时指定轮数",
-        "slider": {
-            "min": 1,
-            "max": 80,
-            "step": 10
-        },
-        "default": 30
+    "llm": {
+        "description": "LLM配置",
+        "type": "object",
+        "items": {
+            "provider_id": {
+                "description": "用于分析画像的LLM提供商",
+                "hint": "留空或者填写的提供商不存在时, 则使用当前正在使用的LLM提供商",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider"
+            },
+            "retry_times": {
+                "description": "LLM调用失败重试次数",
+                "type": "int",
+                "hint": "LLM调用失败时, 重试的次数",
+                "slider": {
+                    "min": 1,
+                    "max": 5,
+                    "step": 1
+                },
+                "default": 2
+            }
+        }
     },
-    "max_msg_count": {
-        "description": "用于分析的最大消息量(条)",
-        "type": "int",
-        "hint": "轮询过程中， 获取的群消息数提前达到了最大消息量时，中断轮询。注意：用于分析的消息量越多, 画像越准确, 但需要消耗更多时间和Token",
-        "slider": {
-            "min": 100,
-            "max": 1000,
-            "step": 10
-        },
-        "default": 500
+    "message": {
+        "description": "消息查询配置",
+        "type": "object",
+        "items": {
+            "default_query_rounds": {
+                "description": "获取群消息的默认轮询次数",
+                "type": "int",
+                "hint": "每轮固定获取200条群消息, 此处指定轮询多少次。也可用命令 “画像 @群友 轮数” 可实时指定轮数",
+                "slider": {
+                    "min": 1,
+                    "max": 80,
+                    "step": 10
+                },
+                "default": 30
+            },
+            "max_msg_count": {
+                "description": "用于分析的最大消息量(条)",
+                "type": "int",
+                "hint": "轮询过程中， 获取的群消息数提前达到了最大消息量时，中断轮询。注意：用于分析的消息量越多, 画像越准确, 但需要消耗更多时间和Token",
+                "slider": {
+                    "min": 100,
+                    "max": 1000,
+                    "step": 10
+                },
+                "default": 500
+            },
+            "cache_ttl_min": {
+                "description": "消息缓存的过期时长(分钟)",
+                "type": "int",
+                "hint": "查询群消息时，会将查询到的消息缓存一段时间方便下次快速取用。此处定义缓存过久过期, 单位为分钟，过期后清除缓存的消息",
+                "slider": {
+                    "min": 1,
+                    "max": 60,
+                    "step": 1
+                },
+                "default": 30
+            }
+        }
     },
-    "cache_ttl_min":{
-        "description": "消息缓存的过期时长(分钟)",
-        "type": "int",
-        "hint": "查询群消息时，会将查询到的消息缓存一段时间方便下次快速取用。此处定义缓存过久过期, 单位为分钟，过期后清除缓存的消息",
-        "slider": {
-            "min": 1,
-            "max": 60,
-            "step": 1
-        },
-        "default": 30
+    "load_builtin_prompt": {
+        "description": "加载内置提示词条目",
+        "type": "bool",
+        "hint": "是否加载插件内置的提示词条目，文件位置: data/plugins/astrbot_plugin_portrayal/default_prompt.yaml",
+        "default": true
     },
-    "provider_id": {
-        "description": "用于分析画像的LLM提供商",
-        "hint": "留空或者填写的提供商不存在时, 则使用当前正在使用的LLM提供商",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider"
-    },
-    "system_prompt_template": {
-        "description": "系统提示词模板",
-        "type": "text",
-        "hint": "用于指导LLM分析群友的性格, 请使用{nickname}和{gender}来表示群友的昵称和性别",
-        "default": "分析{gender}的性格, 明确优点和缺点, 二者权重均衡, 不刻意褒贬；2. 输出全面的性格标签, 同时包含优势标签与缺点标签, 覆盖核心性格维度；3. 分析过程分“优势分析”“缺点分析”两部分, 每部分均需结合聊天记录具体内容作为支撑, 逻辑清晰；4. 最终生成可直接用于AI克隆该人格的提示词, 需完整还原优势与缺点, 确保人格复刻的真实性；5. 整体语气中立客观, 不美化缺点、不夸大优势, 表述平实自然"
-    },
-    "llm_retry_times": { 
-        "description": "LLM调用失败重试次数",
-        "type": "int",
-        "hint": "LLM调用失败时, 重试的次数",
-        "slider": {
-            "min": 1,
-            "max": 5,
-            "step": 1
-        },
-        "default": 2
+    "entry_storage": {
+        "description": "提示词配置",
+        "hint": "可自定义多套提示词，并定义对应触发命令。由此实现不同风格的画像分析",
+        "type": "template_list",
+        "templates": {
+            "default": {
+                "name": "提示词条目",
+                "items": {
+                    "command": {
+                        "description": "触发命令",
+                        "hint": "定义用什么命令触发本套提示词",
+                        "type": "string",
+                        "default": "请输入命令"
+                    },
+                    "content": {
+                        "description": "提示词内容",
+                        "hint": "请填写提示词内容",
+                        "type": "text",
+                        "default": "请输入提示词"
+                    }
+                }
+            }
+        }
     }
 }

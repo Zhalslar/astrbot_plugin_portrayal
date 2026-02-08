@@ -1,6 +1,7 @@
 # config.py
 from __future__ import annotations
 
+import yaml
 from pathlib import Path
 from collections.abc import Mapping, MutableMapping
 from types import MappingProxyType, UnionType
@@ -107,25 +108,25 @@ class ConfigNode:
 # ============ 插件自定义配置 ==================
 
 
-class PluginConfig(ConfigNode):
+class PromptEntry(ConfigNode):
+    command: str
+    content: str
+
+class LLMConfig(ConfigNode):
+    provider_id: str
+    retry_times: int
+
+class MessageConfig(ConfigNode):
     default_query_rounds: int
     max_msg_count: int
     cache_ttl_min: int
-    provider_id: str
-    system_prompt_template: str
-    llm_retry_times: int
 
-    _plugin_name: str = "astrbot_plugin_portrayal"
-
-    def __init__(self, cfg: AstrBotConfig, context: Context):
-        super().__init__(cfg)
-        self.context = context
-        self.data_dir = StarTools.get_data_dir(self._plugin_name)
-        self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
-
+    def __init__(self, data: dict[str, Any]):
+        super().__init__(data)
         self.cache_ttl = self.cache_ttl_min * 60
         self.max_query_rounds = 200
         self.per_query_count = 200
+
     def get_query_rounds(self, rounds=None) -> int:
         """获取查询轮数"""
         if rounds and str(rounds).isdigit():
@@ -133,3 +134,55 @@ class PluginConfig(ConfigNode):
         if not isinstance(rounds, int) or rounds <= 0 or rounds > self.max_query_rounds:
             return self.default_query_rounds
         return rounds
+
+
+class PluginConfig(ConfigNode):
+    llm: LLMConfig
+    message: MessageConfig
+    load_builtin_prompt: bool
+    entry_storage: list[dict[str, Any]]
+
+    _plugin_name: str = "astrbot_plugin_portrayal"
+
+    def __init__(self, cfg: AstrBotConfig, context: Context):
+        super().__init__(cfg)
+        self.context = context
+
+        self.data_dir = StarTools.get_data_dir(self._plugin_name)
+        self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
+        self.builtin_prompt_file = self.plugin_dir / "builtin_prompts.yaml"
+
+        # 加载用户配置
+        self.entries: list[PromptEntry] = [
+            PromptEntry(item) for item in self.entry_storage
+        ]
+        if self.load_builtin_prompt:
+            self.load_builtin_prompts()
+        logger.debug(f"已注册命令：{[e.command for e in self.entries]}")
+
+    def load_builtin_prompts(self) -> None:
+        with self.builtin_prompt_file.open("r", encoding="utf-8") as f:
+            data: list[dict[str, Any]] = yaml.safe_load(f)
+
+        existed_commands = {e.command for e in self.entries}
+        new_items: list[dict[str, Any]] = []
+
+        for item in data:
+            if item["command"] in existed_commands:
+                continue
+            self.entry_storage.append(item)
+            new_items.append(item)
+            self.entries.append(PromptEntry(item))
+
+        if new_items:
+            self.save_config()
+            logger.info(
+                f"[{self._plugin_name}] 已补充并保存内置提示词："
+                f"{[item['command'] for item in new_items]}"
+            )
+
+    def match_prompt_by_cmd(self, message: str) -> str | None:
+        """根据命令匹配提示词"""
+        for entry in self.entries:
+            if entry.command == message:
+                return entry.content

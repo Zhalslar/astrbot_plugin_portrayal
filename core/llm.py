@@ -22,7 +22,7 @@ class LLMService:
 
     def __init__(self, context: Context, config: PluginConfig):
         self.context = context
-        self.cfg = config
+        self.cfg = config.llm
 
     # =========================
     # public api
@@ -30,21 +30,24 @@ class LLMService:
 
     async def generate_portrait(
         self,
-        *,
         texts: list[str],
         profile: UserProfile,
+        system_prompt_template: str,
     ) -> str:
         """
         生成用户画像分析文本
         """
-        system_prompt = self._build_system_prompt(profile)
+        system_prompt = system_prompt_template.format(
+            nickname=profile.nickname,
+            gender=profile.pronoun,
+        )
         prompt = self._build_portrait_prompt(texts, profile)
 
         resp = await self._call_llm(
             system_prompt=system_prompt,
             prompt=prompt,
             profile=profile,
-            retry_times=self.cfg.llm_retry_times,
+            retry_times=self.cfg.retry_times,
         )
         if not resp:
             raise RuntimeError("LLM 响应为空")
@@ -53,12 +56,6 @@ class LLMService:
     # =========================
     # prompt builders
     # =========================
-
-    def _build_system_prompt(self, profile: UserProfile) -> str:
-        return self.cfg.system_prompt_template.format(
-            nickname=profile.nickname,
-            gender=profile.pronoun,
-        )
 
     def _build_portrait_prompt(
         self,

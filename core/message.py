@@ -56,8 +56,7 @@ class MessageManager:
     """
 
     def __init__(self, config: PluginConfig):
-        self.cfg = config
-        self.cache_ttl = 600
+        self.cfg = config.message
 
         # user cache: group:user -> messages
         self._user_cache: dict[str, _CachedMessages] = {}
@@ -78,7 +77,7 @@ class MessageManager:
         if not cached:
             return None
 
-        if time() - cached.timestamp > self.cache_ttl:
+        if time() - cached.timestamp > self.cfg.cache_ttl:
             del self._user_cache[key]
             return None
 
