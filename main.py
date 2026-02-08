@@ -62,7 +62,7 @@ class PortrayalPlugin(Star):
         画像 @群友 <查询轮数>
         """
         cmd = event.message_str.partition(" ")[0]
-        prompt = self.cfg.match_prompt_by_cmd(cmd)
+        prompt = self.entry_service.match_prompt_by_cmd(cmd)
         if not prompt:
             return
         target_id = self.get_at_id(event) or event.get_sender_id()
