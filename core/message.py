@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from astrbot.api import logger
 from dataclasses import dataclass
 from time import time
 from typing import Any
@@ -157,13 +158,20 @@ class MessageManager:
 
         # ---------- scan group messages ----------
         while rounds < max_rounds and len(texts) < self.cfg.max_msg_count:
-            result: dict[str, Any] = await event.bot.api.call_action(
-                "get_group_msg_history",
-                group_id=group_id,
-                message_seq=message_seq,
-                count=self.cfg.per_query_count,
-                reverseOrder=True,
-            )
+            try:
+                # 注意：get_group_msg_history 的 message_seq 是基于消息 ID 的，而不是偏移量
+                result: dict[str, Any] = await event.bot.api.call_action(
+                    "get_group_msg_history",
+                    group_id=group_id,
+                    message_seq=message_seq,
+                    count=self.cfg.per_query_count,
+                    reverseOrder=True,
+                )
+            except Exception as e:
+                logger.error(e)
+                # 这里查询的消息可能已经被撤回了，重置序号
+                message_seq = 0
+                continue
 
             messages = result.get("messages", [])
             if not messages:
