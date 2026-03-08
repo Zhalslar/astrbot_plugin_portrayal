@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-from astrbot.api import logger
 from dataclasses import dataclass
 from time import time
 from typing import Any
 
+from astrbot.api import logger
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
 from .config import PluginConfig
-
-
-# =========================
-# cache models
-# =========================
 
 
 @dataclass

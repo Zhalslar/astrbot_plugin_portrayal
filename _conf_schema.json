@@ -59,13 +59,19 @@
                     "step": 1
                 },
                 "default": 30
+            },
+            "protected_user_ids": {
+                "description": "受保护用户名单",
+                "type": "list",
+                "hint": "填写QQ号。名单中的用户不允许被查询消息",
+                "default": []
             }
         }
     },
-    "load_builtin_prompt": {
-        "description": "加载内置提示词条目",
+    "inject_prompt": {
+        "description": "给提示词注入画像",
         "type": "bool",
-        "hint": "是否加载插件内置的提示词条目，文件位置: data/plugins/astrbot_plugin_portrayal/default_prompt.yaml",
+        "hint": "打开后，每轮对话中，若本地存有当前用户的画像，则自动将该用户画像注入到系统提示词中",
         "default": true
     },
     "entry_storage": {

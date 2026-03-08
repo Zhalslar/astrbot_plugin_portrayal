@@ -1,14 +1,14 @@
 # config.py
 from __future__ import annotations
 
-import yaml
-from pathlib import Path
 from collections.abc import Mapping, MutableMapping
+from pathlib import Path
 from types import MappingProxyType, UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
+from astrbot.core.provider.provider import Provider
 from astrbot.core.star.context import Context
 from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_path
@@ -114,7 +114,7 @@ class PromptEntry(ConfigNode):
 
     def __init__(self, data: dict[str, Any]):
         super().__init__(data)
-  
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "command": self.command,
@@ -131,6 +131,7 @@ class MessageConfig(ConfigNode):
     default_query_rounds: int
     max_msg_count: int
     cache_ttl_min: int
+    protected_user_ids: list[str]
 
     def __init__(self, data: dict[str, Any]):
         super().__init__(data)
@@ -146,11 +147,15 @@ class MessageConfig(ConfigNode):
             return self.default_query_rounds
         return rounds
 
+    def is_protected_user(self, user_id: str | int) -> bool:
+        """检查用户是否在保护名单中"""
+        return str(user_id) in {str(i).strip() for i in self.protected_user_ids}
+
 
 class PluginConfig(ConfigNode):
     llm: LLMConfig
     message: MessageConfig
-    load_builtin_prompt: bool
+    inject_prompt: bool
     entry_storage: list[dict[str, Any]]
 
     _plugin_name: str = "astrbot_plugin_portrayal"
@@ -165,4 +170,14 @@ class PluginConfig(ConfigNode):
         self.cache_dir = self.data_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.builtin_prompt_file = self.plugin_dir / "builtin_prompts.yaml"
+        self.portrayal_file = self.data_dir / "portrayal.json"
 
+    def get_provider(self, *, umo: str | None = None) -> Provider:
+        provider = self.context.get_provider_by_id(
+            self.llm.provider_id
+        ) or self.context.get_using_provider(umo=umo)
+
+        if not isinstance(provider, Provider):
+            raise RuntimeError("未配置用于文本生成任务的 LLM 提供商")
+
+        return provider

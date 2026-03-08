@@ -1,9 +1,12 @@
 # config.py
 from __future__ import annotations
+
 from typing import Any
 
 import yaml
+
 from astrbot.api import logger
+
 from .config import PluginConfig, PromptEntry
 
 
@@ -15,11 +18,10 @@ class EntryService:
         self.entries: list[PromptEntry] = [
             PromptEntry(item) for item in self.cfg.entry_storage
         ]
-        if self.cfg.load_builtin_prompt:
-            self.load_builtin_prompts()
+        self._load_prompts()
         logger.debug(f"已注册命令：{[e.command for e in self.entries]}")
 
-    def load_builtin_prompts(self) -> None:
+    def _load_prompts(self) -> None:
         with self.cfg.builtin_prompt_file.open("r", encoding="utf-8") as f:
             data: list[dict[str, Any]] = yaml.safe_load(f) or []
             self.add_entry(data)
@@ -51,29 +53,3 @@ class EntryService:
             if entry.command == command:
                 return entry.content
 
-    def view_entry(self, command: str | None = None) -> str:
-        """
-        以 Markdown 格式展示 PromptEntry
-        - command 为空：展示所有
-        - command 指定：仅展示对应条目
-        """
-        if command:
-            entries = [e for e in self.entries if e.command == command]
-        else:
-            entries = self.entries
-
-        blocks: list[str] = []
-
-        for entry in entries:
-            block = "\n".join(
-                [
-                    f"### {entry.command}",
-                    "",
-                    "```",
-                    entry.content.strip(),
-                    "```",
-                ]
-            )
-            blocks.append(block)
-
-        return "\n\n\n\n".join(blocks)

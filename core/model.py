@@ -1,36 +1,73 @@
-from __future__ import annotations
-
-from dataclasses import dataclass, asdict
-from typing import Any, Dict
+from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass(slots=True)
 class UserProfile:
-    """
-    用户画像（领域模型）
-    - 存数据库
-    - 做二次分析
-    - 做画像更新 / 版本化
-    """
-
     user_id: str
-    nickname: str
-    gender: str
+    nickname: str = ""
+    remark: str = ""
 
-    # ---------- 语义属性 ----------
+    sex: str = ""
+    birthday: str = ""
 
-    @property
-    def pronoun(self) -> str:
-        """性别代词（用于 prompt）"""
-        return "他" if self.gender == "male" else "她"
+    phoneNum: str = ""
+    eMail: str = ""
 
-    # ---------- 持久化友好 ----------
+    homeTown: str = ""
+    address: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
-        """用于 ORM / JSON / KV 存储"""
+    long_nick: str = ""
+
+    portrait: str = ""
+    timestamp: int = 0
+    clone_prompt: str = ""
+
+    def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "UserProfile":
-        """从数据库记录恢复"""
+    def from_dict(cls, data: dict) -> "UserProfile":
         return cls(**data)
+
+    @classmethod
+    def from_qq_data(
+        cls,
+        user_id: str,
+        *,
+        data: dict[str, Any],
+    ) -> "UserProfile":
+        return cls(
+            user_id=str(user_id),
+            nickname=data.get("nickname", ""),
+            remark=data.get("remark", ""),
+            sex=data.get("sex", ""),
+            birthday=data.get("birthday", ""),
+            phoneNum=data.get("phone", ""),
+            eMail=data.get("email", ""),
+            homeTown=data.get("homeTown", ""),
+            address=data.get("address", ""),
+            long_nick=data.get("long_nick", ""),
+        )
+
+    def to_text(self) -> str:
+        meta = (
+            ("user_id", "QQ号"),
+            ("nickname", "昵称"),
+            ("remark", "备注"),
+            ("sex", "性别"),
+            ("birthday", "生日"),
+            ("phoneNum", "电话"),
+            ("eMail", "邮箱"),
+            ("homeTown", "家乡"),
+            ("address", "现居"),
+            ("long_nick", "签名"),
+        )
+
+        lines = [
+            f"{label}：{value}"
+            for key, label in meta
+            if (value := getattr(self, key)) not in ("", None, 0)
+        ]
+
+        return "\n".join(lines)
