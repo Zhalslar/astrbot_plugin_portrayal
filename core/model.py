@@ -14,7 +14,6 @@ class UserProfile:
     phoneNum: str = ""
     eMail: str = ""
 
-    homeTown: str = ""
     address: str = ""
 
     long_nick: str = ""
@@ -45,7 +44,6 @@ class UserProfile:
             birthday=data.get("birthday", ""),
             phoneNum=data.get("phone", ""),
             eMail=data.get("email", ""),
-            homeTown=data.get("homeTown", ""),
             address=data.get("address", ""),
             long_nick=data.get("long_nick", ""),
         )
@@ -59,7 +57,6 @@ class UserProfile:
             ("birthday", "生日"),
             ("phoneNum", "电话"),
             ("eMail", "邮箱"),
-            ("homeTown", "家乡"),
             ("address", "现居"),
             ("long_nick", "签名"),
         )
