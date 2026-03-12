@@ -21,6 +21,10 @@ class UserProfile:
     portrait: str = ""
     timestamp: int = 0
     clone_prompt: str = ""
+    matched_person: str = ""
+    matched_person_reason: str = ""
+    matched_search_query: str = ""
+    matched_image_url: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

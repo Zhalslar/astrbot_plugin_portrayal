@@ -127,6 +127,73 @@ class LLMConfig(ConfigNode):
     retry_times: int
 
 
+class ImageSearchConfig(ConfigNode):
+    enabled: bool
+    api_key: str
+    endpoint: str
+    engine: str
+    preference: str
+    result_limit: int
+    request_timeout_sec: int
+    language: str
+    country: str
+
+    def is_ready(self) -> bool:
+        return self.enabled and bool((self.api_key or "").strip())
+
+    @classmethod
+    def normalize_preference_value(cls, raw: str | None) -> str | None:
+        if raw is None:
+            return None
+        raw = str(raw).strip()
+        if not raw:
+            return "auto"
+        for sep in ("=", ":", "："):
+            if sep in raw:
+                raw = raw.split(sep, 1)[1].strip()
+                break
+        raw = raw.lower()
+        alias = {
+            "": "auto",
+            "auto": "auto",
+            "自动": "auto",
+            "anime": "anime",
+            "二次元": "anime",
+            "动漫": "anime",
+            "影视": "film_tv",
+            "影视作品": "film_tv",
+            "film": "film_tv",
+            "tv": "film_tv",
+            "film_tv": "film_tv",
+            "历史": "historical",
+            "历史人物": "historical",
+            "historical": "historical",
+            "现实": "real_person",
+            "现实人物": "real_person",
+            "真人": "real_person",
+            "real": "real_person",
+            "real_person": "real_person",
+        }
+        return alias.get(raw)
+
+    def normalized_preference(self) -> str:
+        return self.normalize_preference_value(self.preference) or "auto"
+
+    def preference_label(self) -> str:
+        labels = {
+            "auto": "自动",
+            "anime": "二次元",
+            "film_tv": "影视作品",
+            "historical": "历史人物",
+            "real_person": "现实人物",
+        }
+        return labels[self.normalized_preference()]
+
+    @staticmethod
+    def preference_help_text() -> str:
+        return "自动/二次元/影视作品/历史人物/现实人物"
+
+
 class MessageConfig(ConfigNode):
     default_query_rounds: int
     max_msg_count: int
@@ -154,6 +221,7 @@ class MessageConfig(ConfigNode):
 
 class PluginConfig(ConfigNode):
     llm: LLMConfig
+    image_search: ImageSearchConfig
     message: MessageConfig
     inject_prompt: bool
     entry_storage: list[dict[str, Any]]
@@ -161,6 +229,20 @@ class PluginConfig(ConfigNode):
     _plugin_name: str = "astrbot_plugin_portrayal"
 
     def __init__(self, cfg: AstrBotConfig, context: Context):
+        cfg.setdefault(
+            "image_search",
+            {
+                "enabled": False,
+                "api_key": "",
+                "endpoint": "https://serpapi.com/search.json",
+                "engine": "google_images",
+                "preference": "auto",
+                "result_limit": 5,
+                "request_timeout_sec": 20,
+                "language": "zh-cn",
+                "country": "cn",
+            },
+        )
         super().__init__(cfg)
         self.context = context
 

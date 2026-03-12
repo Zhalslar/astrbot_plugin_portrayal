@@ -23,6 +23,76 @@
             }
         }
     },
+    "image_search": {
+        "description": "搜图配置",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用根据画像找人物图片",
+                "type": "bool",
+                "hint": "打开后，在生成画像后会继续尝试匹配一个公开人物或角色，并通过搜图 API 拉取图片",
+                "default": false
+            },
+            "api_key": {
+                "description": "搜图 API Key",
+                "type": "string",
+                "hint": "当前实现默认接入 SerpApi，需要填写可用的 API Key",
+                "default": ""
+            },
+            "endpoint": {
+                "description": "搜图 API 地址",
+                "type": "string",
+                "hint": "默认使用 SerpApi 的 Google Images 接口",
+                "default": "https://serpapi.com/search.json"
+            },
+            "engine": {
+                "description": "搜索引擎",
+                "type": "string",
+                "hint": "默认 google_images，通常无需修改",
+                "default": "google_images"
+            },
+            "preference": {
+                "description": "人物偏好",
+                "type": "string",
+                "hint": "可填写：auto（自动）、anime（二次元）、film_tv（影视作品）、historical（历史人物）、real_person（现实人物）",
+                "default": "auto"
+            },
+            "result_limit": {
+                "description": "候选图片数",
+                "type": "int",
+                "hint": "搜图 API 返回的候选图片数量，插件会优先取第一个可下载结果",
+                "slider": {
+                    "min": 1,
+                    "max": 10,
+                    "step": 1
+                },
+                "default": 5
+            },
+            "request_timeout_sec": {
+                "description": "搜图请求超时(秒)",
+                "type": "int",
+                "hint": "用于搜图 API 请求和图片下载的超时时间",
+                "slider": {
+                    "min": 5,
+                    "max": 60,
+                    "step": 1
+                },
+                "default": 20
+            },
+            "language": {
+                "description": "搜索语言",
+                "type": "string",
+                "hint": "SerpApi 的 hl 参数，例如 zh-cn、en",
+                "default": "zh-cn"
+            },
+            "country": {
+                "description": "搜索地区",
+                "type": "string",
+                "hint": "SerpApi 的 gl 参数，例如 cn、us",
+                "default": "cn"
+            }
+        }
+    },
     "message": {
         "description": "消息查询配置",
         "type": "object",

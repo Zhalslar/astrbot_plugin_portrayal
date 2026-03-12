@@ -4,7 +4,7 @@ from astrbot.api import logger, sp
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.message.components import At, Node, Nodes, Plain
+from astrbot.core.message.components import Node, Nodes, Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -14,9 +14,11 @@ from astrbot.core.provider.entities import ProviderRequest
 from .core.config import PluginConfig
 from .core.db import UserProfileDB
 from .core.entry import EntryService
+from .core.image_search import ImageSearchService, PersonImageMatch
 from .core.llm import LLMService
 from .core.message import MessageManager
 from .core.model import UserProfile
+from .core.utils import get_at_id
 
 
 class PortrayalPlugin(Star):
@@ -27,6 +29,7 @@ class PortrayalPlugin(Star):
         self.db = UserProfileDB(self.cfg)
         self.msg = MessageManager(self.cfg)
         self.entry_service = EntryService(self.cfg)
+        self.image_search = ImageSearchService(self.cfg)
         self.llm = LLMService(self.cfg)
         self.style = None
 
@@ -47,11 +50,10 @@ class PortrayalPlugin(Star):
         """
         查看画像 @群友
         """
-        ats = [str(seg.qq) for seg in event.get_messages()[1:] if isinstance(seg, At)]
-        if not ats:
+        target_id = get_at_id(event)
+        if not target_id:
             yield event.plain_result("命令格式：查看画像 @群友")
             return
-        target_id = ats[0]
         if self.cfg.message.is_protected_user(target_id):
             yield event.plain_result("该用户在保护名单中，不允许查询")
             return
@@ -59,8 +61,57 @@ class PortrayalPlugin(Star):
         if not profile:
             yield event.plain_result("本地暂无该用户画像记录")
             return
-        msg = f"【{profile.nickname}】的画像\n{profile.to_text()}"
-        yield event.plain_result(msg)
+        async for result in self._yield_portrait_result(event, profile):
+            yield result
+
+    @filter.command("找画像")
+    async def find_portrayal_person(self, event: AiocqhttpMessageEvent):
+        """
+        找画像 @群友 [偏好]
+        """
+        if not self.cfg.image_search.enabled:
+            yield event.plain_result("搜图功能未开启，请先在插件配置中启用")
+            return
+        if not self.cfg.image_search.api_key.strip():
+            yield event.plain_result("搜图功能未配置 API Key，请先在插件配置中填写")
+            return
+
+        target_id = get_at_id(event) or event.get_sender_id()
+        if self.cfg.message.is_protected_user(target_id):
+            yield event.plain_result("该用户在保护名单中，不允许查询")
+            return
+
+        profile = self.db.get(target_id)
+        if not profile or not profile.portrait.strip():
+            yield event.plain_result("本地暂无该用户画像，请先执行“画像 @群友”")
+            return
+
+        preference = self._resolve_preference_from_command(event.message_str)
+        if preference is False:
+            yield event.plain_result(
+                f"偏好参数无效，可用值：{self.cfg.image_search.preference_help_text()}"
+            )
+            return
+        preference_label = self._get_preference_label(preference)
+
+        async for result in self._yield_portrait_result(event, profile):
+            yield result
+        yield event.plain_result(
+            f"正在根据【{profile.nickname or target_id}】的画像匹配人物并搜图"
+            f"（当前偏好：{preference_label}）..."
+        )
+        match = await self._match_person_image(
+            profile,
+            profile.portrait,
+            preference=preference,
+            umo=event.unified_msg_origin,
+        )
+        if not match:
+            yield event.plain_result("没有找到可用的人物图片")
+            return
+
+        yield event.plain_result(self._format_match_message(match))
+        yield event.image_result(str(match.local_path))
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -79,7 +130,7 @@ class PortrayalPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def get_portrayal(self, event: AiocqhttpMessageEvent):
         """
-        画像 @群友 <查询轮数>
+        画像 @群友 <查询轮数> [偏好]
         """
         cmd = event.message_str.partition(" ")[0]
         is_clone = True if "克隆" in cmd else False
@@ -87,20 +138,28 @@ class PortrayalPlugin(Star):
         if not prompt:
             return
 
-        ats = [str(seg.qq) for seg in event.get_messages()[1:] if isinstance(seg, At)]
-        if not ats:
+        target_id = get_at_id(event)
+        if not target_id:
             yield event.plain_result("命令格式：画像 @群友 <查询轮数>")
             return
 
         # 检查权限
-        target_id = ats[0]
         if self.cfg.message.is_protected_user(target_id):
             yield event.plain_result("该用户在保护名单中，不允许查询")
             return
 
         # 解析查询轮数
-        end_param = event.message_str.split(" ")[-1]
-        query_rounds = self.cfg.message.get_query_rounds(end_param)
+        query_rounds = self.cfg.message.default_query_rounds
+        for token in self._iter_command_tokens(event.message_str):
+            if token.isdigit():
+                query_rounds = self.cfg.message.get_query_rounds(token)
+
+        preference = self._resolve_preference_from_command(event.message_str)
+        if preference is False:
+            yield event.plain_result(
+                f"偏好参数无效，可用值：{self.cfg.image_search.preference_help_text()}"
+            )
+            return
 
         # 获取基本信息
         info = await event.bot.get_stranger_info(user_id=int(target_id), no_cache=True)
@@ -109,6 +168,10 @@ class PortrayalPlugin(Star):
             profile.portrait = old_profile.portrait
             profile.timestamp = old_profile.timestamp
             profile.clone_prompt = old_profile.clone_prompt
+            profile.matched_person = old_profile.matched_person
+            profile.matched_person_reason = old_profile.matched_person_reason
+            profile.matched_search_query = old_profile.matched_search_query
+            profile.matched_image_url = old_profile.matched_image_url
 
         yield event.plain_result(
             f"正在发起{query_rounds}轮查询来获取{profile.nickname}的聊天记录..."
@@ -167,33 +230,29 @@ class PortrayalPlugin(Star):
         profile.portrait = content
         profile.timestamp = int(time.time())
         self.db.set(profile)
-        if self.style:
-            img = await self.style.AioRender(text=content, useImageUrl=True)
-            img_path = img.Save(self.cfg.cache_dir)
-            yield event.image_result(str(img_path))
-        else:
-            nodes = Nodes(
-                [
-                    Node(
-                        uin=profile.user_id,
-                        name=profile.nickname,
-                        content=[Plain(content)],
-                    )
-                ]
-            )
-            yield event.chain_result([nodes])
+        async for result in self._yield_portrait_result(event, profile):
+            yield result
+
+        match = await self._match_person_image(
+            profile,
+            content,
+            preference=preference,
+            umo=event.unified_msg_origin,
+        )
+        if match:
+            yield event.plain_result(self._format_match_message(match))
+            yield event.image_result(str(match.local_path))
 
     @filter.command("切换人格")
     async def switch_persona(self, event: AiocqhttpMessageEvent):
         """
         切换人格 @群友
         """
-        ats = [str(seg.qq) for seg in event.get_messages()[1:] if isinstance(seg, At)]
-        if not ats:
+        target_id = get_at_id(event)
+        if not target_id:
             yield event.plain_result("命令格式：切换人格 @群友")
             return
 
-        target_id = ats[0]
         if self.cfg.message.is_protected_user(target_id):
             yield event.plain_result("该用户在保护名单中，不允许切换")
             return
@@ -245,3 +304,97 @@ class PortrayalPlugin(Star):
             f"已将当前对话切换为【{profile.nickname}】的克隆人格。"
             f"如需避免旧上下文影响，请使用 /reset。{force_warn_msg}"
         )
+
+    async def _match_person_image(
+        self,
+        profile: UserProfile,
+        portrait: str,
+        *,
+        preference: str | None = None,
+        umo: str | None = None,
+    ) -> PersonImageMatch | None:
+        if not self.cfg.image_search.is_ready():
+            return None
+
+        try:
+            match = await self.image_search.match_person_by_portrait(
+                portrait,
+                profile,
+                preference=preference,
+                umo=umo,
+            )
+        except Exception as e:
+            logger.warning(f"搜图流程失败：{profile.user_id} -> {e}")
+            return None
+
+        profile.matched_person = match.person_name
+        profile.matched_person_reason = match.reason
+        profile.matched_search_query = match.search_query
+        profile.matched_image_url = match.image_url
+        self.db.set(profile)
+        return match
+
+    @staticmethod
+    def _format_match_message(match: PersonImageMatch) -> str:
+        extra = f"\n来源：{match.source_link}" if match.source_link else ""
+        return (
+            f"根据画像匹配到的人物：{match.person_name}\n"
+            f"匹配原因：{match.reason}\n"
+            f"搜图关键词：{match.search_query}{extra}"
+        )
+
+    async def _yield_portrait_result(
+        self,
+        event: AiocqhttpMessageEvent,
+        profile: UserProfile,
+    ):
+        if self.style:
+            img = await self.style.AioRender(text=profile.portrait, useImageUrl=True)
+            img_path = img.Save(self.cfg.cache_dir)
+            yield event.image_result(str(img_path))
+            return
+
+        nodes = Nodes(
+            [
+                Node(
+                    uin=profile.user_id,
+                    name=profile.nickname,
+                    content=[Plain(profile.portrait)],
+                )
+            ]
+        )
+        yield event.chain_result([nodes])
+
+    @staticmethod
+    def _iter_command_tokens(message_str: str) -> list[str]:
+        parts = message_str.strip().split()
+        return parts[1:] if len(parts) > 1 else []
+
+    def _resolve_preference_from_command(self, message_str: str) -> str | bool | None:
+        tokens = self._iter_command_tokens(message_str)
+        if not tokens:
+            return None
+
+        saw_preference_marker = False
+        for token in tokens:
+            normalized = self.cfg.image_search.normalize_preference_value(token)
+            if normalized:
+                return normalized
+            if any(marker in token.lower() for marker in ("偏好", "preference")):
+                saw_preference_marker = True
+
+        if saw_preference_marker:
+            return False
+        return None
+
+    def _get_preference_label(self, preference: str | None) -> str:
+        if preference:
+            labels = {
+                "auto": "自动",
+                "anime": "二次元",
+                "film_tv": "影视作品",
+                "historical": "历史人物",
+                "real_person": "现实人物",
+            }
+            return labels[preference]
+        return self.cfg.image_search.preference_label()
