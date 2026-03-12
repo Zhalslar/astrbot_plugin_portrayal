@@ -1,7 +1,17 @@
 name: astrbot_plugin_portrayal
 display_name: 人物画像
 desc: 爬取群友的聊天记录，进而用llm分析群友画像
-help: 略
+help: |-
+  指令说明：
+  1. 画像 @群友 [轮数] [偏好]
+     分析目标群友画像；启用搜图后会追加输出匹配人物图片。
+  2. 找画像/找人物 @群友 [偏好]
+     基于已有画像匹配人物并输出图片。
+  3. 查看画像 @群友
+     查看本地已保存的画像结果。
+  4. 切换人格 @群友
+     将当前会话切换为该群友的克隆人格。
+  偏好可选：自动、二次元、影视作品、历史人物、现实人物
 version: v1.2.0
 author: Zhalslar
 repo: https://github.com/Zhalslar/astrbot_plugin_portrayal

@@ -64,10 +64,11 @@ class PortrayalPlugin(Star):
         async for result in self._yield_portrait_result(event, profile):
             yield result
 
+    @filter.command("找人物")
     @filter.command("找画像")
     async def find_portrayal_person(self, event: AiocqhttpMessageEvent):
         """
-        找画像 @群友 [偏好]
+        找画像/找人物 @群友 [偏好]
         """
         if not self.cfg.image_search.enabled:
             yield event.plain_result("搜图功能未开启，请先在插件配置中启用")
@@ -89,7 +90,7 @@ class PortrayalPlugin(Star):
         preference = self._resolve_preference_from_command(event.message_str)
         if preference is False:
             yield event.plain_result(
-                f"偏好参数无效，可用值：{self.cfg.image_search.preference_help_text()}"
+                f"偏好参数无效，可用值：{self.cfg.image_search.preference_help_text()}\n"
             )
             return
         preference_label = self._get_preference_label(preference)
@@ -157,7 +158,7 @@ class PortrayalPlugin(Star):
         preference = self._resolve_preference_from_command(event.message_str)
         if preference is False:
             yield event.plain_result(
-                f"偏好参数无效，可用值：{self.cfg.image_search.preference_help_text()}"
+                f"偏好参数无效，可用值：{self.cfg.image_search.preference_help_text()}\n"
             )
             return
 
@@ -340,7 +341,9 @@ class PortrayalPlugin(Star):
         return (
             f"根据画像匹配到的人物：{match.person_name}\n"
             f"匹配原因：{match.reason}\n"
-            f"搜图关键词：{match.search_query}{extra}"
+            f"搜图关键词：{match.search_query}\n"
+            "如需指定风格，可在命令末尾追加：anime / film_tv / historical / real_person"
+            f"{extra}"
         )
 
     async def _yield_portrait_result(
