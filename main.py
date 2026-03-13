@@ -64,9 +64,17 @@ class PortrayalPlugin(Star):
         async for result in self._yield_portrait_result(event, profile):
             yield result
 
-    @filter.command("找人物")
     @filter.command("找画像")
     async def find_portrayal_person(self, event: AiocqhttpMessageEvent):
+        async for result in self._handle_find_portrayal_person(event):
+            yield result
+
+    @filter.command("找人物")
+    async def find_portrayal_person_alias(self, event: AiocqhttpMessageEvent):
+        async for result in self._handle_find_portrayal_person(event):
+            yield result
+
+    async def _handle_find_portrayal_person(self, event: AiocqhttpMessageEvent):
         """
         找画像/找人物 @群友 [偏好]
         """
