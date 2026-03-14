@@ -131,7 +131,7 @@ class PortrayalPlugin(Star):
         else:
             yield event.plain_result(
                 f"已从{result.scanned_messages}条群消息中提取到"
-                f"{result.count}条{profile.nickname}的聊天记录，正在分析{cmd}..."
+                f"{result.count}条{profile.nickname}的聊天记录，正在{cmd}..."
             )
 
         # LLM 分析画像
@@ -222,7 +222,7 @@ class PortrayalPlugin(Star):
             )
         ).get("persona_id")
 
-        persona_id = f"portrayal_clone_{profile.user_id}"
+        persona_id = profile.nickname
         try:
             await self.context.persona_manager.update_persona(
                 persona_id=persona_id,
