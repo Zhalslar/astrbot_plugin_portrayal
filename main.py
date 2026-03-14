@@ -183,6 +183,7 @@ class PortrayalPlugin(Star):
             )
             yield event.chain_result([nodes])
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("切换人格")
     async def switch_persona(self, event: AiocqhttpMessageEvent):
         """
