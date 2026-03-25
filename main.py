@@ -4,7 +4,7 @@ from astrbot.api import logger, sp
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.message.components import At, Node, Nodes, Plain
+from astrbot.core.message.components import At, Image, Node, Nodes, Plain, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -170,7 +170,11 @@ class PortrayalPlugin(Star):
         if self.style:
             img = await self.style.AioRender(text=content, useImageUrl=True)
             img_path = img.Save(self.cfg.cache_dir)
-            yield event.image_result(str(img_path))
+            chain = []
+            if reply_id := getattr(event.message_obj, "message_id", None):
+                chain.append(Reply(reply_id))
+            chain.append(Image(str(img_path)))
+            yield event.chain_result(chain)
         else:
             nodes = Nodes(
                 [

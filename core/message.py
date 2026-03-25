@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from time import time
+from time import monotonic, time
 from typing import Any
 
 from astrbot.api import logger
@@ -75,7 +76,7 @@ class MessageManager:
 
         if time() - cached.timestamp > self.cfg.cache_ttl:
             del self._user_cache[key]
-            del self._group_cursor[group_id]
+            self._group_cursor.pop(group_id, None)
             return None
 
         return cached.texts
@@ -148,25 +149,31 @@ class MessageManager:
 
         texts = cached[:] if cached else []
         rounds = 0
+        scanned_messages = 0
 
         # 群级扫描断点
         message_seq = self._group_cursor.get(group_id, 0)
 
         # ---------- scan group messages ----------
         while rounds < max_rounds and len(texts) < self.cfg.max_msg_count:
+            round_started = monotonic()
             try:
                 # 注意：get_group_msg_history 的 message_seq 是基于消息 ID 的，而不是偏移量
-                result: dict[str, Any] = await event.bot.api.call_action(
-                    "get_group_msg_history",
-                    group_id=group_id,
-                    message_seq=message_seq,
-                    count=self.cfg.per_query_count,
-                    reverseOrder=True,
+                result: dict[str, Any] = await asyncio.wait_for(
+                    event.bot.api.call_action(
+                        "get_group_msg_history",
+                        group_id=group_id,
+                        message_seq=message_seq,
+                        count=self.cfg.per_query_count,
+                        reverseOrder=True,
+                    ),
+                    timeout=self.cfg.query_timeout_sec,
                 )
 
                 messages = result.get("messages", [])
                 if not messages:
                     break
+                scanned_messages += len(messages)
 
                 # 更新群扫描断点
                 message_seq = messages[0]["message_id"]
@@ -179,17 +186,38 @@ class MessageManager:
                 cached = self._get_user_cache(group_id, target_id)
                 if cached:
                     texts = cached[:]
+                logger.debug(
+                    "history round %s fetched %s messages in %.2fs for group %s",
+                    rounds + 1,
+                    len(messages),
+                    monotonic() - round_started,
+                    group_id,
+                )
 
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "get_group_msg_history timeout after %.1fs in round %s for group %s",
+                    self.cfg.query_timeout_sec,
+                    rounds + 1,
+                    group_id,
+                )
+                self._group_cursor.pop(group_id, None)
+                break
             except Exception as e:
-                logger.error(e)
-                # 这里查询的消息可能不存在，重置序号
-                message_seq = 0
-                self.clear_cache()
+                logger.error(f"query group history failed: {e}")
+                self._group_cursor.pop(group_id, None)
+                break
 
             rounds += 1
+            if (
+                rounds < max_rounds
+                and len(texts) < self.cfg.max_msg_count
+                and self.cfg.query_interval_sec > 0
+            ):
+                await asyncio.sleep(self.cfg.query_interval_sec)
 
         return MessageQueryResult(
             texts=texts[: self.cfg.max_msg_count],
-            scanned_messages=rounds * self.cfg.per_query_count,
+            scanned_messages=scanned_messages,
             from_cache=cached is not None,
         )
