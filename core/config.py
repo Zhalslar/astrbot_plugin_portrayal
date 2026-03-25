@@ -131,6 +131,8 @@ class MessageConfig(ConfigNode):
     default_query_rounds: int
     max_msg_count: int
     cache_ttl_min: int
+    query_interval_ms: int
+    query_timeout_sec: int
     protected_user_ids: list[str]
 
     def __init__(self, data: dict[str, Any]):
@@ -138,6 +140,14 @@ class MessageConfig(ConfigNode):
         self.cache_ttl = self.cache_ttl_min * 60
         self.max_query_rounds = 200
         self.per_query_count = 200
+        interval_ms = (
+            self.query_interval_ms if isinstance(self.query_interval_ms, int) else 300
+        )
+        timeout_sec = (
+            self.query_timeout_sec if isinstance(self.query_timeout_sec, int) else 10
+        )
+        self.query_interval_sec = max(0, interval_ms) / 1000
+        self.query_timeout_sec = max(1, timeout_sec)
 
     def get_query_rounds(self, rounds=None) -> int:
         """获取查询轮数"""

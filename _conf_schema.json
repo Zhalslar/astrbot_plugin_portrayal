@@ -60,6 +60,28 @@
                 },
                 "default": 30
             },
+            "query_interval_ms": {
+                "description": "每轮历史消息查询的间隔(毫秒)",
+                "type": "int",
+                "hint": "两次 get_group_msg_history 之间主动等待一小段时间，避免连续拉历史把协议端卡死",
+                "slider": {
+                    "min": 0,
+                    "max": 3000,
+                    "step": 100
+                },
+                "default": 300
+            },
+            "query_timeout_sec": {
+                "description": "单轮历史消息查询超时(秒)",
+                "type": "int",
+                "hint": "单次拉取历史消息超过这个时间就放弃本轮，避免整个画像流程一直卡住",
+                "slider": {
+                    "min": 3,
+                    "max": 30,
+                    "step": 1
+                },
+                "default": 10
+            },
             "protected_user_ids": {
                 "description": "受保护用户名单",
                 "type": "list",
