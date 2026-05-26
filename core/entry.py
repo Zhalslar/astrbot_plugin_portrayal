@@ -13,6 +13,7 @@ from .config import PluginConfig, PromptEntry
 class EntryService:
     def __init__(self, config: PluginConfig):
         self.cfg = config
+        self._migrate_entry_storage()
 
         # 加载用户配置
         self.entries: list[PromptEntry] = [
@@ -25,6 +26,16 @@ class EntryService:
         with self.cfg.builtin_prompt_file.open("r", encoding="utf-8") as f:
             data: list[dict[str, Any]] = yaml.safe_load(f) or []
             self.add_entry(data)
+
+    def _migrate_entry_storage(self) -> None:
+        updated = False
+        for item in self.cfg.entry_storage:
+            if "need_admin" not in item:
+                item["need_admin"] = False
+                updated = True
+        if updated:
+            self.cfg.save_config()
+            logger.info("已为旧版提示词配置补全 need_admin 字段")
 
     def add_entry(self, data: list[dict[str, Any]]) -> None:
         existed_commands = {e.command for e in self.entries}
@@ -47,9 +58,4 @@ class EntryService:
             if entry.command == command:
                 return entry
 
-    def match_prompt_by_cmd(self, command: str) -> str | None:
-        """根据命令匹配提示词"""
-        for entry in self.entries:
-            if entry.command == command:
-                return entry.content
 

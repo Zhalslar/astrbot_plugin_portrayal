@@ -88,6 +88,12 @@
                         "type": "string",
                         "default": "请输入命令"
                     },
+                    "need_admin": { 
+                        "description": "仅管理员可用",
+                        "hint": "是否需要bot管理员权限触发命令",
+                        "type": "bool",
+                        "default": false
+                    },
                     "content": {
                         "description": "提示词内容",
                         "hint": "请填写提示词内容",

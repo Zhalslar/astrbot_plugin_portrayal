@@ -83,8 +83,10 @@ class PortrayalPlugin(Star):
         """
         cmd = event.message_str.partition(" ")[0]
         is_clone = True if "克隆" in cmd else False
-        prompt = self.entry_service.match_prompt_by_cmd(cmd)
+        prompt = self.entry_service.get_entry(cmd)
         if not prompt:
+            return
+        if prompt.need_admin and not event.is_admin():
             return
 
         ats = [str(seg.qq) for seg in event.get_messages()[1:] if isinstance(seg, At)]
@@ -139,7 +141,7 @@ class PortrayalPlugin(Star):
             content = await self.llm.generate_portrait(
                 result.texts,
                 profile,
-                prompt,
+                prompt.content,
                 umo=event.unified_msg_origin,
             )
         except Exception as e:

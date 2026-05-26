@@ -110,6 +110,7 @@ class ConfigNode:
 
 class PromptEntry(ConfigNode):
     command: str
+    need_admin: bool
     content: str
 
     def __init__(self, data: dict[str, Any]):
@@ -118,6 +119,7 @@ class PromptEntry(ConfigNode):
     def to_dict(self) -> dict[str, Any]:
         return {
             "command": self.command,
+            "need_admin": self.need_admin,
             "content": self.content,
         }
 
