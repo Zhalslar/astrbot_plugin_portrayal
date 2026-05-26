@@ -225,6 +225,29 @@ class PortrayalPlugin(Star):
             )
         ).get("persona_id")
 
+        # 切换前保存 bot 原始 昵称/QQ号，用于后续 "恢复人格"
+        # 仅在首次切换时缓存，避免被克隆名字覆盖
+        saved_info = await sp.get_async(
+            scope="umo",
+            scope_id=umo,
+            key="portrayal_original_bot_info",
+            default=None,
+        )
+        if not saved_info:
+            try:
+                login_info = await event.bot.get_login_info()
+                await sp.put_async(
+                    scope="umo",
+                    scope_id=umo,
+                    key="portrayal_original_bot_info",
+                    value={
+                        "nickname": login_info.get("nickname", ""),
+                        "user_id": str(login_info.get("user_id", "")),
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"获取 bot 原始资料失败：{e}")
+
         try:
             await self.context.persona_manager.update_persona(
                 persona_id=profile.persona_id,
@@ -239,13 +262,20 @@ class PortrayalPlugin(Star):
         await self.context.conversation_manager.update_conversation_persona_id(
             umo, profile.persona_id
         )
+
+        # 切换时一并清空当前对话历史，避免旧上下文污染；
+        # 同时绕开 “bot 昵称变更后 /reset 唤醒失败” 的问题
+        await self.context.conversation_manager.update_conversation(
+            umo, cid, history=[]
+        )
+
         force_warn_msg = ""
         if force_applied_persona_id:
             force_warn_msg = "提醒：由于自定义规则，您现在切换的人格将不会生效。"
 
         yield event.plain_result(
-            f"已将当前对话切换为【{profile.nickname}】的克隆人格。"
-            f"如需避免旧上下文影响，请使用 /reset。{force_warn_msg}"
+            f"已将当前对话切换为【{profile.nickname}】的克隆人格，对话历史已清空。"
+            f"如需还原，请使用：恢复人格。{force_warn_msg}"
         )
 
         # 同步 bot 昵称
@@ -258,3 +288,69 @@ class PortrayalPlugin(Star):
         )
         await event.bot.set_qq_avatar(file=avatar_url)
         logger.debug(f"已同步bot的头像为: {avatar_url}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("恢复人格")
+    async def restore_persona(self, event: AiocqhttpMessageEvent):
+        """
+        恢复人格
+        """
+        umo = event.unified_msg_origin
+        cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
+
+        # 取默认人格 id；找不到就回落到 "default"
+        cfg = self.context.get_config(umo=umo)
+        default_persona_id = (
+            cfg.get("provider_settings", {}).get("default_personality") or "default"
+        )
+
+        if cid:
+            await self.context.conversation_manager.update_conversation_persona_id(
+                umo, default_persona_id
+            )
+            # 顺手清空历史，相当于内置 /reset。
+            # 切换人格后 bot 昵称被改，按名称唤醒的场景下 /reset 可能无法触发，
+            # 在恢复指令里直接清掉历史，让用户不再依赖 /reset。
+            await self.context.conversation_manager.update_conversation(
+                umo, cid, history=[]
+            )
+
+        # 还原 bot 昵称 / 头像
+        original_info = await sp.get_async(
+            scope="umo",
+            scope_id=umo,
+            key="portrayal_original_bot_info",
+            default=None,
+        )
+
+        restored_nickname = ""
+        if original_info:
+            nickname = original_info.get("nickname", "")
+            user_id = original_info.get("user_id", "")
+            try:
+                if nickname:
+                    await event.bot.set_qq_profile(nickname=nickname)
+                    restored_nickname = nickname
+                    logger.debug(f"已还原bot的昵称为: {nickname}")
+                if user_id:
+                    avatar_url = (
+                        f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
+                    )
+                    await event.bot.set_qq_avatar(file=avatar_url)
+                    logger.debug(f"已还原bot的头像为: {avatar_url}")
+            except Exception as e:
+                logger.error(f"还原 bot 资料失败：{e}")
+            # 还原成功后清掉缓存的原始信息
+            await sp.remove_async(
+                scope="umo",
+                scope_id=umo,
+                key="portrayal_original_bot_info",
+            )
+
+        msg = f"已恢复默认人格【{default_persona_id}】，对话历史已清空。"
+        if restored_nickname:
+            msg += f" bot 昵称已还原为【{restored_nickname}】。"
+        elif not original_info:
+            msg += " （未找到原始 bot 资料缓存，昵称/头像需手动恢复）"
+
+        yield event.plain_result(msg)
