@@ -1,4 +1,7 @@
+import base64
 import time
+
+import aiohttp
 
 from astrbot.api import logger, sp
 from astrbot.api.event import filter
@@ -225,6 +228,45 @@ class PortrayalPlugin(Star):
             )
         ).get("persona_id")
 
+        # 切换前保存 bot 原始昵称 / 头像字节
+        saved_info = await sp.get_async(
+            scope="umo",
+            scope_id=umo,
+            key="portrayal_original_bot_info",
+            default=None,
+        )
+        if not saved_info:
+            try:
+                login_info = await event.bot.get_login_info()
+                bot_user_id = str(login_info.get("user_id", ""))
+                avatar_b64 = ""
+                if bot_user_id:
+                    avatar_url = (
+                        f"https://q4.qlogo.cn/headimg_dl?dst_uin={bot_user_id}&spec=640"
+                    )
+                    try:
+                        timeout = aiohttp.ClientTimeout(total=15)
+                        async with aiohttp.ClientSession(timeout=timeout) as session:
+                            async with session.get(avatar_url) as resp:
+                                resp.raise_for_status()
+                                avatar_bytes = await resp.read()
+                                avatar_b64 = base64.b64encode(avatar_bytes).decode()
+                    except Exception as e:
+                        logger.warning(f"下载 bot 原始头像失败：{e}")
+
+                await sp.put_async(
+                    scope="umo",
+                    scope_id=umo,
+                    key="portrayal_original_bot_info",
+                    value={
+                        "nickname": login_info.get("nickname", ""),
+                        "user_id": bot_user_id,
+                        "avatar_b64": avatar_b64,
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"获取 bot 原始资料失败：{e}")
+
         try:
             await self.context.persona_manager.update_persona(
                 persona_id=profile.persona_id,
@@ -239,13 +281,19 @@ class PortrayalPlugin(Star):
         await self.context.conversation_manager.update_conversation_persona_id(
             umo, profile.persona_id
         )
+
+        # 清空当前对话历史
+        await self.context.conversation_manager.update_conversation(
+            umo, cid, history=[]
+        )
+
         force_warn_msg = ""
         if force_applied_persona_id:
             force_warn_msg = "提醒：由于自定义规则，您现在切换的人格将不会生效。"
 
         yield event.plain_result(
-            f"已将当前对话切换为【{profile.nickname}】的克隆人格。"
-            f"如需避免旧上下文影响，请使用 /reset。{force_warn_msg}"
+            f"已将当前对话切换为【{profile.nickname}】的克隆人格，对话历史已清空。"
+            f"如需还原，请使用：恢复人格。{force_warn_msg}"
         )
 
         # 同步 bot 昵称
@@ -258,3 +306,69 @@ class PortrayalPlugin(Star):
         )
         await event.bot.set_qq_avatar(file=avatar_url)
         logger.debug(f"已同步bot的头像为: {avatar_url}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("恢复人格")
+    async def restore_persona(self, event: AiocqhttpMessageEvent):
+        """
+        恢复人格
+        """
+        umo = event.unified_msg_origin
+        cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
+
+        # 取默认人格 id
+        cfg = self.context.get_config(umo=umo)
+        default_persona_id = (
+            cfg.get("provider_settings", {}).get("default_personality") or "default"
+        )
+
+        if cid:
+            await self.context.conversation_manager.update_conversation_persona_id(
+                umo, default_persona_id
+            )
+            await self.context.conversation_manager.update_conversation(
+                umo, cid, history=[]
+            )
+
+        # 还原 bot 昵称 / 头像
+        original_info = await sp.get_async(
+            scope="umo",
+            scope_id=umo,
+            key="portrayal_original_bot_info",
+            default=None,
+        )
+
+        restored_nickname = ""
+        avatar_restored = False
+        if original_info:
+            nickname = original_info.get("nickname", "")
+            avatar_b64 = original_info.get("avatar_b64", "")
+            try:
+                if nickname:
+                    await event.bot.set_qq_profile(nickname=nickname)
+                    restored_nickname = nickname
+                    logger.debug(f"已还原bot的昵称为: {nickname}")
+                if avatar_b64:
+                    # 用 base64 字节原样塞回去；不能用 dst_uin URL，
+                    # 因为那个 URL 在切换后已经指向克隆群友的头像了
+                    await event.bot.set_qq_avatar(file=f"base64://{avatar_b64}")
+                    avatar_restored = True
+                    logger.debug("已用缓存的原图还原bot头像")
+            except Exception as e:
+                logger.error(f"还原 bot 资料失败：{e}")
+            # 还原成功后清掉缓存的原始信息
+            await sp.remove_async(
+                scope="umo",
+                scope_id=umo,
+                key="portrayal_original_bot_info",
+            )
+
+        msg = f"已恢复默认人格【{default_persona_id}】，对话历史已清空。"
+        if restored_nickname:
+            msg += f" bot 昵称已还原为【{restored_nickname}】。"
+        if original_info and not avatar_restored:
+            msg += "（头像原图未缓存或还原失败，需手动恢复）"
+        elif not original_info:
+            msg += "（未找到原始 bot 资料缓存，昵称/头像需手动恢复）"
+
+        yield event.plain_result(msg)
