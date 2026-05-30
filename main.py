@@ -228,10 +228,7 @@ class PortrayalPlugin(Star):
             )
         ).get("persona_id")
 
-        # 切换前保存 bot 原始 昵称 / 头像字节，用于后续 "恢复人格"
-        # 仅在首次切换时缓存，避免被克隆名字 / 头像覆盖
-        # 注意：头像不能仅存 URL（dst_uin=bot_id 总是指向"当前头像"，
-        # 一旦改完就回来的不是原图了），必须把字节快照保存下来
+        # 切换前保存 bot 原始昵称 / 头像字节
         saved_info = await sp.get_async(
             scope="umo",
             scope_id=umo,
@@ -285,8 +282,7 @@ class PortrayalPlugin(Star):
             umo, profile.persona_id
         )
 
-        # 切换时一并清空当前对话历史，避免旧上下文污染；
-        # 同时绕开 “bot 昵称变更后 /reset 唤醒失败” 的问题
+        # 清空当前对话历史
         await self.context.conversation_manager.update_conversation(
             umo, cid, history=[]
         )
@@ -320,7 +316,7 @@ class PortrayalPlugin(Star):
         umo = event.unified_msg_origin
         cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
 
-        # 取默认人格 id；找不到就回落到 "default"
+        # 取默认人格 id
         cfg = self.context.get_config(umo=umo)
         default_persona_id = (
             cfg.get("provider_settings", {}).get("default_personality") or "default"
@@ -330,9 +326,6 @@ class PortrayalPlugin(Star):
             await self.context.conversation_manager.update_conversation_persona_id(
                 umo, default_persona_id
             )
-            # 顺手清空历史，相当于内置 /reset。
-            # 切换人格后 bot 昵称被改，按名称唤醒的场景下 /reset 可能无法触发，
-            # 在恢复指令里直接清掉历史，让用户不再依赖 /reset。
             await self.context.conversation_manager.update_conversation(
                 umo, cid, history=[]
             )
