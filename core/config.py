@@ -15,15 +15,6 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_path
 
 
 class ConfigNode:
-    """
-    配置节点, 把 dict 变成强类型对象。
-
-    规则：
-    - schema 来自子类类型注解
-    - 声明字段：读写，写回底层 dict
-    - 未声明字段和下划线字段：仅挂载属性，不写回
-    - 支持 ConfigNode 多层嵌套（lazy + cache）
-    """
 
     _SCHEMA_CACHE: dict[type, dict[str, type]] = {}
     _FIELDS_CACHE: dict[type, set[str]] = {}
@@ -89,23 +80,14 @@ class ConfigNode:
         object.__setattr__(self, key, value)
 
     def raw_data(self) -> Mapping[str, Any]:
-        """
-        底层配置 dict 的只读视图
-        """
         return MappingProxyType(self._data)
 
     def save_config(self) -> None:
-        """
-        保存配置到磁盘（仅允许在根节点调用）
-        """
         if not isinstance(self._data, AstrBotConfig):
             raise RuntimeError(
                 f"{self.__class__.__name__}.save_config() 只能在根配置节点上调用"
             )
         self._data.save_config()
-
-
-# ============ 插件自定义配置 ==================
 
 
 class PromptEntry(ConfigNode):
@@ -168,7 +150,6 @@ class PluginConfig(ConfigNode):
 
         self.data_dir = StarTools.get_data_dir(self._plugin_name)
         self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
-        self.style_dir = self.plugin_dir / "pillowmd_style"
         self.cache_dir = self.data_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.builtin_prompt_file = self.plugin_dir / "builtin_prompts.yaml"
