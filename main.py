@@ -4,7 +4,7 @@ from astrbot.api import logger, sp
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.message.components import At, Node, Nodes, Plain
+from astrbot.core.message.components import At
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -28,19 +28,12 @@ class PortrayalPlugin(Star):
         self.msg = MessageManager(self.cfg)
         self.entry_service = EntryService(self.cfg)
         self.llm = LLMService(self.cfg)
-        self.style = None
 
     async def initialize(self):
-        """加载插件时调用"""
-        try:
-            import pillowmd
-
-            self.style = pillowmd.LoadMarkdownStyles(self.cfg.style_dir)
-        except Exception as e:
-            logger.error(f"无法加载pillowmd样式：{e}")
+        pass
 
     async def terminate(self):
-        self.msg.clear_cache()
+        self.msg.save_cache()
 
     @filter.command("查看画像")
     async def view_portrayal(self, event: AiocqhttpMessageEvent):
@@ -82,7 +75,6 @@ class PortrayalPlugin(Star):
         画像 @群友 <查询轮数>
         """
         cmd = event.message_str.partition(" ")[0]
-        is_clone = True if "克隆" in cmd else False
         prompt = self.entry_service.get_entry(cmd)
         if not prompt:
             return
@@ -128,7 +120,7 @@ class PortrayalPlugin(Star):
         if result.from_cache and result.scanned_messages <= 0:
             yield event.plain_result(
                 f"命中缓存，已提取到{result.count}条{profile.nickname}的聊天记录，"
-                f"正在分析{cmd}..."
+                f"正在{cmd}..."
             )
         else:
             yield event.plain_result(
@@ -149,41 +141,15 @@ class PortrayalPlugin(Star):
             yield event.plain_result(f"分析失败：{e}")
             return
 
-        # 保存克隆人格并发送
-        if is_clone:
+        # 保存克隆人格
+        if "克隆" in cmd:
             profile.clone_prompt = content
-            self.db.set(profile)
-            nodes = Nodes(
-                [
-                    Node(
-                        uin=profile.user_id,
-                        name=f"克隆的{profile.nickname}",
-                        content=[Plain(content)],
-                    )
-                ]
-            )
-            yield event.chain_result([nodes])
-            return
 
         # 保存画像并发送
         profile.portrait = content
         profile.timestamp = int(time.time())
         self.db.set(profile)
-        if self.style:
-            img = await self.style.AioRender(text=content, useImageUrl=True)
-            img_path = img.Save(self.cfg.cache_dir)
-            yield event.image_result(str(img_path))
-        else:
-            nodes = Nodes(
-                [
-                    Node(
-                        uin=profile.user_id,
-                        name=profile.nickname,
-                        content=[Plain(content)],
-                    )
-                ]
-            )
-            yield event.chain_result([nodes])
+        yield event.plain_result(content)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("切换人格")

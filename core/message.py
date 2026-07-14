@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from time import time
 from typing import Any
@@ -10,19 +11,13 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 )
 
 from .config import PluginConfig
-
-
-@dataclass
-class _CachedMessages:
-    texts: list[str]
-    timestamp: float
+from .message_cache import CachedMessages, MessageCacheStorage
 
 
 @dataclass
 class MessageQueryResult:
-    """
-    消息查询结果对象
-    """
+    """Store collected messages and query metadata."""
+
     texts: list[str]
     scanned_messages: int
     from_cache: bool
@@ -42,23 +37,22 @@ class MessageQueryResult:
 
 
 class MessageManager:
-    """
-    群级扫描 + 用户级缓存 的消息管理器
+    """Manage group-level scans and per-user message caches.
 
-    特性：
-    - 同一群查询任意用户都会复用扫描进度
-    - 扫描过程中自动缓存其他人的消息
-    - 下次查询从群断点继续
+    Queries in the same group share scan progress. Each scanned page caches
+    messages for every user, and later queries continue from the group cursor.
     """
 
     def __init__(self, config: PluginConfig):
         self.cfg = config.message
+        self._storage = MessageCacheStorage(config.cache_dir)
 
         # user cache: group:user -> messages
-        self._user_cache: dict[str, _CachedMessages] = {}
+        self._user_cache, self._group_cursor = self._storage.load()
 
         # group cursor: group -> message_seq
-        self._group_cursor: dict[str, int] = {}
+        # group lock: serialize history scans within the same group
+        self._group_locks: dict[str, asyncio.Lock] = {}
 
     # =========================
     # cache helpers
@@ -74,8 +68,11 @@ class MessageManager:
             return None
 
         if time() - cached.timestamp > self.cfg.cache_ttl:
-            del self._user_cache[key]
-            del self._group_cursor[group_id]
+            self._group_cursor.pop(group_id, None)
+            for group_user_key in tuple(self._user_cache):
+                if group_user_key.startswith(f"{group_id}:"):
+                    del self._user_cache[group_user_key]
+            self.save_cache()
             return None
 
         return cached.texts
@@ -83,6 +80,11 @@ class MessageManager:
     def clear_cache(self):
         self._user_cache.clear()
         self._group_cursor.clear()
+        self._storage.clear()
+
+    def save_cache(self) -> None:
+        """Persist the current in-memory message cache."""
+        self._storage.save(self._user_cache, self._group_cursor)
 
     # =========================
     # message parsing
@@ -93,9 +95,7 @@ class MessageManager:
         group_id: str,
         messages: list[dict[str, Any]],
     ):
-        """
-        将一页群消息拆分并缓存到各个用户
-        """
+        """Cache one page of group messages by user."""
         now = time()
 
         for msg in messages:
@@ -112,7 +112,7 @@ class MessageManager:
             cached = self._user_cache.get(key)
 
             if not cached:
-                self._user_cache[key] = _CachedMessages(
+                self._user_cache[key] = CachedMessages(
                     texts=[text],
                     timestamp=now,
                 )
@@ -131,8 +131,15 @@ class MessageManager:
         *,
         max_rounds: int,
     ) -> MessageQueryResult:
-        """
-        获取指定用户在群内的历史文本消息
+        """Get the target user history from the current group.
+
+        Args:
+            event: Current group message event.
+            target_id: Target user ID.
+            max_rounds: Maximum number of history pages to query.
+
+        Returns:
+            The collected texts and query metadata.
         """
         group_id = str(event.get_group_id())
         target_id = str(target_id)
@@ -148,45 +155,54 @@ class MessageManager:
 
         texts = cached[:] if cached else []
         rounds = 0
+        cache_changed = False
 
-        # 群级扫描断点
+        # Resume from the shared group scan cursor.
         message_seq = self._group_cursor.get(group_id, 0)
+        group_lock = self._group_locks.setdefault(group_id, asyncio.Lock())
 
         # ---------- scan group messages ----------
         while rounds < max_rounds and len(texts) < self.cfg.max_msg_count:
             try:
-                # 注意：get_group_msg_history 的 message_seq 是基于消息 ID 的，而不是偏移量
-                result: dict[str, Any] = await event.bot.api.call_action(
-                    "get_group_msg_history",
-                    group_id=group_id,
-                    message_seq=message_seq,
-                    count=self.cfg.per_query_count,
-                    reverseOrder=True,
-                )
+                # message_seq is a message ID, not an offset.
+                async with group_lock:
+                    cached = self._get_user_cache(group_id, target_id)
+                    if cached and len(cached) >= self.cfg.max_msg_count:
+                        texts = cached[:]
+                        break
+
+                    message_seq = self._group_cursor.get(group_id, 0)
+                    result: dict[str, Any] = await event.bot.api.call_action(
+                        "get_group_msg_history",
+                        group_id=group_id,
+                        message_seq=message_seq,
+                        count=self.cfg.per_query_count,
+                        reverseOrder=True,
+                    )
+                    messages = result.get("messages", [])
+                    if messages:
+                        message_seq = messages[0]["message_id"]
+                        self._group_cursor[group_id] = message_seq
+                        self._collect_messages(group_id, messages)
+                        cache_changed = True
 
                 messages = result.get("messages", [])
                 if not messages:
                     break
 
-                # 更新群扫描断点
-                message_seq = messages[0]["message_id"]
-                self._group_cursor[group_id] = message_seq
-
-                # 关键点：这一页给所有人缓存
-                self._collect_messages(group_id, messages)
-
-                # 再取目标用户
+                # Refresh the target cache after collecting the page.
                 cached = self._get_user_cache(group_id, target_id)
                 if cached:
                     texts = cached[:]
 
             except Exception as e:
                 logger.error(e)
-                # 这里查询的消息可能不存在，重置序号
-                message_seq = 0
-                self.clear_cache()
+                break
 
             rounds += 1
+
+        if cache_changed:
+            self.save_cache()
 
         return MessageQueryResult(
             texts=texts[: self.cfg.max_msg_count],
