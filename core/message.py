@@ -146,7 +146,7 @@ class MessageManager:
 
         # ---------- cache first ----------
         cached = self._get_user_cache(group_id, target_id)
-        if cached and len(cached) >= self.cfg.max_msg_count:
+        if cached:
             return MessageQueryResult(
                 texts=cached[: self.cfg.max_msg_count],
                 scanned_messages=0,
@@ -167,7 +167,7 @@ class MessageManager:
                 # message_seq is a message ID, not an offset.
                 async with group_lock:
                     cached = self._get_user_cache(group_id, target_id)
-                    if cached and len(cached) >= self.cfg.max_msg_count:
+                    if cached:
                         texts = cached[:]
                         break
 
