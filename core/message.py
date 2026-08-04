@@ -77,14 +77,6 @@ class MessageManager:
 
         return cached.texts
 
-    def _count_group_cached_messages(self, group_id: str) -> int:
-        """Count total cached messages for a group across all users."""
-        return sum(
-            len(cached.texts)
-            for key, cached in self._user_cache.items()
-            if key.startswith(f"{group_id}:")
-        )
-
     def clear_cache(self):
         self._user_cache.clear()
         self._group_cursor.clear()
@@ -152,7 +144,8 @@ class MessageManager:
         group_id = str(event.get_group_id())
         target_id = str(target_id)
 
-        # ---------- check user cache first ----------
+        # Only short-circuit when THIS user already has enough messages.
+        # Never treat "sum of all users in group cache" as the target history.
         cached = self._get_user_cache(group_id, target_id)
         if cached and len(cached) >= self.cfg.max_msg_count:
             return MessageQueryResult(
@@ -162,42 +155,21 @@ class MessageManager:
             )
 
         texts = cached[:] if cached else []
-        
-        # ---------- determine scan strategy ----------
-        # Count total cached messages in the group
-        group_cached_count = self._count_group_cached_messages(group_id)
-        
-        # Calculate required messages (how many more we need)
-        required = self.cfg.max_msg_count - len(texts)
-        
-        # If group cache is sufficient, extract from existing cache
-        if group_cached_count >= required:
-            return MessageQueryResult(
-                texts=texts[: self.cfg.max_msg_count],
-                scanned_messages=0,
-                from_cache=True,
-            )
-        
-        # Calculate needed rounds based on deficit and per-query count
-        deficit = required - group_cached_count
-        needed_rounds = min(
-            max_rounds,
-            (deficit + self.cfg.per_query_count - 1) // self.cfg.per_query_count
-        )
-        
         rounds = 0
         cache_changed = False
-
-        # Resume from the shared group scan cursor.
-        message_seq = self._group_cursor.get(group_id, 0)
         group_lock = self._group_locks.setdefault(group_id, asyncio.Lock())
 
-        # ---------- scan group messages ----------
-        while rounds < needed_rounds and len(texts) < self.cfg.max_msg_count:
+        # Keep scanning up to max_rounds until the target user has enough
+        # messages, history is exhausted, or an API error occurs.
+        # Do NOT break merely because a partial cache entry exists — that was
+        # written by the previous round of this same scan.
+        while rounds < max_rounds and len(texts) < self.cfg.max_msg_count:
             try:
                 # message_seq is a message ID, not an offset.
                 async with group_lock:
                     cached = self._get_user_cache(group_id, target_id)
+                    # Another concurrent query may have already filled enough
+                    # for this user while we waited on the lock.
                     if cached and len(cached) >= self.cfg.max_msg_count:
                         texts = cached[:]
                         break
@@ -238,5 +210,5 @@ class MessageManager:
         return MessageQueryResult(
             texts=texts[: self.cfg.max_msg_count],
             scanned_messages=rounds * self.cfg.per_query_count,
-            from_cache=cached is not None,
+            from_cache=bool(texts) and rounds == 0,
         )
