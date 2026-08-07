@@ -162,29 +162,26 @@ class MessageManager:
             )
 
         texts = cached[:] if cached else []
-        
+
         # ---------- determine scan strategy ----------
-        # Count total cached messages in the group
+        max_fetchable = max_rounds * self.cfg.per_query_count
         group_cached_count = self._count_group_cached_messages(group_id)
-        
-        # Calculate required messages (how many more we need)
-        required = self.cfg.max_msg_count - len(texts)
-        
-        # If group cache is sufficient, extract from existing cache
-        if group_cached_count >= required:
+
+        # If group cache already covers what this query could fetch, skip scanning
+        if group_cached_count >= max_fetchable:
             return MessageQueryResult(
                 texts=texts[: self.cfg.max_msg_count],
                 scanned_messages=0,
                 from_cache=True,
             )
-        
-        # Calculate needed rounds based on deficit and per-query count
-        deficit = required - group_cached_count
+
+        # Only scan the missing rounds: deficit ÷ per_query_count, rounded up
+        deficit = max_fetchable - group_cached_count
         needed_rounds = min(
             max_rounds,
             (deficit + self.cfg.per_query_count - 1) // self.cfg.per_query_count
         )
-        
+
         rounds = 0
         cache_changed = False
 
