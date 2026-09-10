@@ -52,6 +52,9 @@
         .apiPost(PLUGIN + "/generate", { user_id: uid, mode: mode })
         .then(unwrap("生成失败"));
     },
+    cachedUsers: function () {
+      return bridge().apiGet(PLUGIN + "/cached-users").then(unwrap("读取缓存候选失败"));
+    },
   };
 
   // 后端统一返回 { status, message, data }；出错时抛中文提示
@@ -98,24 +101,36 @@
 
   function copyText(text) {
     if (!text) return Promise.reject(new Error("没有可复制的内容"));
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(text);
-    }
-    return new Promise(function (resolve, reject) {
+
+    function legacyCopy() {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+      var ok = false;
       try {
-        var ta = document.createElement("textarea");
-        ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-        resolve();
+        ok = document.execCommand("copy");
       } catch (e) {
-        reject(e);
+        ok = false;
       }
-    });
+      document.body.removeChild(ta);
+      return ok;
+    }
+
+    // iframe 里 clipboard API 常被权限策略拒绝，失败后必须真正退回复制方案
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(function () {
+        if (legacyCopy()) return;
+        throw new Error("浏览器拒绝了复制权限，请手动选中复制");
+      });
+    }
+    if (legacyCopy()) return Promise.resolve();
+    return Promise.reject(new Error("当前环境不支持自动复制，请手动选中复制"));
   }
 
   // ---------------------------------------------------------------- app
@@ -128,6 +143,7 @@
       detail: document.querySelector("[data-detail]"),
       pager: document.querySelector("[data-pager]"),
       toasts: document.querySelector("[data-toasts]"),
+      cached: document.querySelector("[data-cached]"),
     };
     this.state = {
       limits: { max_safe_len: 2000 },
@@ -135,6 +151,7 @@
       config: {},
       entries: [],
       users: [],
+      cached: [],
       total: 0,
       page: 1,
       search: "",
@@ -181,16 +198,7 @@
     var self = this;
     this.state.loading = true;
     self.status("加载中…");
-    var params = {
-      limit: PAGE_SIZE,
-      offset: self.state.offset,
-      search: self.state.search,
-      only_clone: self.state.onlyClone,
-      only_portrait: self.state.onlyPortrait,
-      sort: self.state.sort,
-      desc: self.state.desc,
-    };
-    return Promise.all([api.overview(), api.users(params)])
+    return Promise.all([api.overview(), api.users(this.userParams())])
       .then(function (out) {
         var overview = out[0] || {};
         var users = out[1] || {};
@@ -200,6 +208,7 @@
         self.state.limits = overview.limits || { max_safe_len: 2000 };
         self.state.users = users.users || [];
         self.state.total = users.total || 0;
+        self.clampOffset();
         self.renderAll();
         self.status("就绪", "ok");
       })
@@ -209,6 +218,31 @@
       .then(function () {
         self.state.loading = false;
       });
+  };
+
+  App.prototype.userParams = function () {
+    var st = this.state;
+    return {
+      limit: PAGE_SIZE,
+      offset: st.offset,
+      search: st.search,
+      only_clone: st.onlyClone,
+      only_portrait: st.onlyPortrait,
+      sort: st.sort,
+      desc: st.desc,
+    };
+  };
+
+  // 列表变短（存档变少 / 搜索过滤）时把 offset 拉回合法范围
+  App.prototype.clampOffset = function () {
+    var st = this.state;
+    var maxPage = Math.max(1, Math.ceil(st.total / PAGE_SIZE));
+    var maxOffset = (maxPage - 1) * PAGE_SIZE;
+    if (st.offset > maxOffset) {
+      st.offset = maxOffset;
+      return true;
+    }
+    return false;
   };
 
   App.prototype.selectUser = function (uid) {
@@ -314,20 +348,14 @@
   App.prototype.refreshList = function () {
     var self = this;
     return api
-      .users({
-        limit: PAGE_SIZE,
-        offset: self.state.offset,
-        search: self.state.search,
-        only_clone: self.state.onlyClone,
-        only_portrait: self.state.onlyPortrait,
-        sort: self.state.sort,
-        desc: self.state.desc,
-      })
+      .users(this.userParams())
       .then(function (data) {
         self.state.users = data.users || [];
         self.state.total = data.total || 0;
+        if (self.clampOffset()) return self.refreshList();
         self.renderList();
         self.renderPager();
+        return null;
       });
   };
 
@@ -469,6 +497,81 @@
     );
   };
 
+  // ---------------------------------------------------------------- 从缓存建档
+  App.prototype.loadCachedUsers = function () {
+    var self = this;
+    api
+      .cachedUsers()
+      .then(function (data) {
+        self.state.cached = (data && data.users) || [];
+        self.renderCached();
+      })
+      .catch(function () {
+        self.state.cached = [];
+        self.renderCached();
+      });
+  };
+
+  App.prototype.createProfile = function (uid) {
+    var self = this;
+    self.state.busy = true;
+    api
+      .update(uid, "create", "（占位人格，请用「用缓存生成」或「LLM 重写」补全）")
+      .then(function () {
+        self.toast("已为 " + uid + " 建档，可用「用缓存生成」生成人格", "ok");
+        self.state.cached = (self.state.cached || []).filter(function (u) {
+          return u.user_id !== uid;
+        });
+        self.renderCached();
+        return self.load();
+      })
+      .then(function () {
+        self.selectUser(uid);
+      })
+      .catch(function (err) {
+        self.fail(err, "建档失败");
+      })
+      .then(function () {
+        self.state.busy = false;
+        self.renderCached();
+      });
+  };
+
+  App.prototype.renderCached = function () {
+    var self = this;
+    var st = this.state;
+    var host = this.el.cached;
+    if (!host) return;
+    clear(host);
+    var items = st.cached || [];
+    if (!items.length) return;
+
+    host.appendChild(
+      el("div", {
+        class: "cached-title",
+        text: "缓存里还有 " + items.length + " 位群友没有档案（先在群里跑过「画像」或「克隆人格」才会有缓存）",
+      })
+    );
+    var row = el("div", { class: "cached-list" });
+    items.slice(0, 12).forEach(function (u) {
+      row.appendChild(
+        el("button", {
+          class: "chip",
+          disabled: st.busy,
+          title: "为该群友建档",
+          text: u.user_id + " · " + u.messages + " 条",
+          onclick: function () {
+            self.createProfile(u.user_id);
+          },
+        })
+      );
+    });
+    if (items.length > 12) {
+      row.appendChild(el("span", { class: "muted small", text: "…等共 " + items.length + " 位" }));
+    }
+    host.appendChild(row);
+  };
+
   App.prototype.renderDetail = function () {
     var self = this;
     var st = this.state;
@@ -536,6 +639,7 @@
         el("button", {
           class: "btn" + (st.mode === m[0] ? " primary" : ""),
           text: m[1],
+          disabled: st.busy,
           onclick: function () {
             self.setMode(m[0]);
           },
@@ -591,11 +695,17 @@
       rewrite: "LLM 重写：把编辑框内容当作「修改要求」，由 LLM 重写整份人格。",
     };
     pane.appendChild(el("div", { class: "hint", text: hints[st.mode] || "" }));
+    if (st.busy) {
+      pane.appendChild(
+        el("div", { class: "hint hint-warn", text: "正在处理，编辑已暂时锁定…" })
+      );
+    }
 
     // 编辑区
     var ta = el("textarea", {
       class: "editor",
       spellcheck: "false",
+      disabled: st.busy,
       placeholder:
         st.mode === "rewrite"
           ? "例如：说话更短、少用颜文字、被夸时别急着自嘲"
@@ -620,7 +730,7 @@
       el("button", {
         class: "btn btn-ghost",
         text: "载入当前人格",
-        disabled: st.mode === "rewrite" || !cur.clone_prompt,
+        disabled: st.busy || st.mode === "rewrite" || !cur.clone_prompt,
         onclick: function () {
           st.draft = cur.clone_prompt || "";
           self.renderDetail();
@@ -631,6 +741,7 @@
       el("button", {
         class: "btn btn-ghost",
         text: "清空",
+        disabled: st.busy,
         onclick: function () {
           st.draft = "";
           self.renderDetail();
@@ -670,8 +781,14 @@
     split.appendChild(
       el("article", { class: "card" }, [
         el("header", {}, [
-          el("h3", { text: "当前画像" }),
-          el("span", { class: "muted small", text: cur.portrait_len + " 字" }),
+          el("h3", { text: cur.portrait_stale ? "当前画像（可能早于人格改动）" : "当前画像" }),
+          el("span", {
+            class: "muted small " + (cur.portrait_stale ? "warn-text" : ""),
+            text:
+              cur.portrait_len +
+              " 字" +
+              (cur.portrait_stale ? " · 建议重新跑一次「画像」" : ""),
+          }),
         ]),
         el("pre", { class: "pre", text: cur.portrait || "（尚未生成）" }),
       ])
@@ -690,6 +807,7 @@
     app.el.detail = document.querySelector("[data-detail]");
     app.el.pager = document.querySelector("[data-pager]");
     app.el.toasts = document.querySelector("[data-toasts]");
+    app.el.cached = document.querySelector("[data-cached]");
 
     var search = document.querySelector("[data-search]");
     if (search) {
@@ -735,6 +853,7 @@
     }
 
     app.load();
+    app.loadCachedUsers();
   }
 
   if (document.readyState === "loading") {

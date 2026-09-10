@@ -205,6 +205,8 @@ class PluginConfig(ConfigNode):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.builtin_prompt_file = self.plugin_dir / "builtin_prompts.yaml"
         self.portrayal_file = self.data_dir / "portrayal.json"
+        # 机器人自身昵称/头像的全局备份（账号级，不能用会话级存储）
+        self.bot_identity_file = self.data_dir / "bot_identity.json"
 
     def get_provider(self, *, umo: str | None = None) -> Provider:
         provider = self.context.get_provider_by_id(

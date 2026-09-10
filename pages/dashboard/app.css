@@ -183,6 +183,63 @@ body {
     margin-top: 3px;
 }
 
+/* ---------------- 从缓存建档 ---------------- */
+
+.cached {
+    margin-bottom: 14px;
+}
+
+.cached:empty {
+    display: none;
+}
+
+.cached {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--warn);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+}
+
+.cached-title {
+    font-size: 12.5px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+}
+
+.cached-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.chip {
+    background: var(--bg-elev);
+    color: var(--text);
+    border: 1px dashed var(--border-strong);
+    border-radius: 999px;
+    padding: 3px 11px;
+    font-size: 12px;
+    font-family: var(--mono);
+    cursor: pointer;
+}
+
+.chip:hover:not(:disabled) {
+    border-color: var(--accent);
+    border-style: solid;
+    color: var(--accent);
+}
+
+.chip:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.warn-text {
+    color: var(--warn);
+}
+
 /* ---------------- 工具条 ---------------- */
 
 .toolbar {

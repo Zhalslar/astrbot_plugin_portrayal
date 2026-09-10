@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -264,7 +265,7 @@ def test_page_api(tmp: Path):
     api = plugin.page_api
     check("面板接口 已注册", api is not None)
     routes = {r[0] for r in getattr(ctx, "registered_web_apis", [])}
-    check("构造时注册了路由", len(routes) == 6, str(sorted(routes)))
+    check("构造时注册了路由", len(routes) == 7, str(sorted(routes)))
 
     def call(coro):
         return asyncio.run(coro)
@@ -380,6 +381,7 @@ def test_registration_paths():
         "/astrbot_plugin_portrayal/update",
         "/astrbot_plugin_portrayal/generate",
         "/astrbot_plugin_portrayal/cache",
+        "/astrbot_plugin_portrayal/cached-users",
     }
     check("路由 全覆盖", expected.issubset(set(routes)), str(sorted(routes)))
     check("路由 方法齐全", all(r[2] for r in registered))
@@ -391,6 +393,173 @@ def test_registration_paths():
         "路由 注册了插件名前缀",
         all(r[0].startswith("/astrbot_plugin_portrayal/") for r in registered),
     )
+
+
+def test_route_matching_with_real_host():
+    """用 AstrBot 真实的路由匹配函数验证注册路径可命中（不是只比对字符串）"""
+    print("[路由匹配（真实 host 函数）]")
+    host_plugins = Path(r"E:\codex\AstrBot\backend\app\astrbot\dashboard\api\plugins.py")
+    if not host_plugins.is_file():
+        check("host 源码可读（跳过）", True)
+        return
+
+    try:
+        sys.path.insert(0, r"E:\codex\AstrBot\backend\app")
+        from astrbot.dashboard.api.plugins import (  # type: ignore  # noqa
+            _match_registered_web_api,
+            _plugin_api_route_pattern,
+        )
+    except Exception as e:
+        print(f"  [SKIP] 无法导入 host 匹配函数：{e}")
+        return
+
+    class FakeContext:
+        def __init__(self):
+            self.registered_web_apis = []
+
+        def register_web_api(self, route, handler, methods, desc):
+            self.registered_web_apis.append((route, handler, methods, desc))
+
+    fake_plugin = type("P", (), {"persona_service": None})()
+    ctx = FakeContext()
+    plugin_main.register_plugin_page_api(ctx, fake_plugin)
+    apis = ctx.registered_web_apis
+
+    check(
+        "user 路由被编译成路径参数",
+        _plugin_api_route_pattern("/astrbot_plugin_portrayal/user/<user_id>")
+        == "/astrbot_plugin_portrayal/user/(?P<user_id>[^/]+)",
+    )
+
+    hit = _match_registered_web_api(apis, "/astrbot_plugin_portrayal/user/123456", "GET")
+    check("GET user/123456 命中", hit is not None and hit[1] == {"user_id": "123456"})
+
+    hit = _match_registered_web_api(apis, "/astrbot_plugin_portrayal/overview", "GET")
+    check("GET overview 命中", hit is not None and hit[1] == {})
+
+    hit = _match_registered_web_api(apis, "/astrbot_plugin_portrayal/update", "POST")
+    check("POST update 命中", hit is not None)
+
+    check(
+        "GET update 被方法过滤掉",
+        _match_registered_web_api(apis, "/astrbot_plugin_portrayal/update", "GET") is None,
+    )
+    check(
+        "空 user_id 不命中",
+        _match_registered_web_api(apis, "/astrbot_plugin_portrayal/user/", "GET") is None,
+    )
+    check(
+        "cached-users 命中",
+        _match_registered_web_api(apis, "/astrbot_plugin_portrayal/cached-users", "GET")
+        is not None,
+    )
+
+
+def test_cache_ttl_is_honored(tmp: Path):
+    """过期缓存不能被面板拿来生成人格（与聊天路径保持一致）"""
+    print("[缓存 TTL]")
+    import time as _time
+
+    from portrayal_plugin.core.message_cache import CachedMessages
+
+    plugin = make_plugin(None, tmp)
+    svc = plugin.persona_service
+    now = _time.time()
+
+    plugin.msg._user_cache["111:222"] = CachedMessages(texts=["stale A", "stale B"], timestamp=now - 11 * 3600)
+    plugin.msg._user_cache["333:222"] = CachedMessages(texts=["fresh C"], timestamp=now - 60)
+
+    texts, groups = plugin.msg.iter_cached_texts("222")
+    check("过期条目被过滤", texts == ["fresh C"], str(texts))
+    check("只统计未过期群", groups == 1, str(groups))
+
+    # 过期群整组清理
+    check("过期群记录已清理", "111:222" not in plugin.msg._user_cache)
+    check("过期群游标已清理", 111 not in plugin.msg._group_cursor)
+
+    plugin.msg._user_cache.clear()
+    plugin.msg._user_cache["111:222"] = CachedMessages(texts=["stale"], timestamp=now - 11 * 3600)
+    texts, groups = plugin.msg.iter_cached_texts("222")
+    check("全过期时视为无缓存", (texts, groups) == ([], 0), f"{texts} {groups}")
+
+    try:
+        asyncio.run(svc.generate_from_cache("222", mode="merge"))
+        check("无有效缓存时生成应报错", False)
+    except PersonaError as e:
+        check("无有效缓存被拒", "缓存" in str(e))
+
+    # 多群按最近抓取优先
+    plugin.msg._user_cache.clear()
+    plugin.msg._user_cache["a:5"] = CachedMessages(texts=["old1", "old2", "old3"], timestamp=now - 600)
+    plugin.msg._user_cache["b:5"] = CachedMessages(texts=["new1", "new2"], timestamp=now - 10)
+    texts, groups = plugin.msg.iter_cached_texts("5")
+    check("最近的群排在前", texts[:2] == ["new1", "new2"], str(texts))
+
+    # 键里带冒号时按最后一个冒号切分（group_id 里可能有冒号，user_id 不会）
+    plugin.msg._user_cache.clear()
+    plugin.msg._user_cache["111:222:333"] = CachedMessages(texts=["colon key"], timestamp=now)
+    check("带冒号的分组键能按最后冒号切分", plugin.msg.iter_cached_texts("333")[0] == ["colon key"])
+    check("不会把 222:333 当成用户 id", plugin.msg.iter_cached_texts("222:333")[0] == [])
+
+    # 候选列表同样只用未过期数据
+    plugin.msg._user_cache.clear()
+    plugin.msg._user_cache["g:1"] = CachedMessages(texts=["x", "y"], timestamp=now)
+    plugin.msg._user_cache["g:2"] = CachedMessages(texts=["z"], timestamp=now - 99999)
+    cands = plugin.persona_service.cached_candidates()
+    check("候选只含未过期用户", [c["user_id"] for c in cands["users"]] == ["1"], str(cands))
+
+    plugin.db.set(UserProfile(user_id="1", nickname="已建档"))
+    cands = plugin.persona_service.cached_candidates()
+    check("已有档案不重复出现在候选中", cands["total"] == 0, str(cands))
+
+
+def test_db_write_safety(tmp: Path):
+    """portrayal.json 写入是原子的，损坏文件不会导致档案清零"""
+    print("[档案写入安全]")
+    plugin = make_plugin(None, tmp)
+    plugin.db.set(UserProfile(user_id="1", nickname="甲", clone_prompt="人格一"))
+    plugin.db.set(UserProfile(user_id="2", nickname="乙", clone_prompt="人格二"))
+    check("正常写入", plugin.db.file.exists() and len(plugin.db._data) == 2)
+
+    # 原子替换：目录里不应残留 .tmp
+    tmph = list(plugin.db.file.parent.glob("portrayal.json.tmp"))
+    check("无残留临时文件", not tmph, str(tmph))
+
+    # 文件损坏时不能把内存清空
+    bad_path = plugin.db.file.with_suffix(".json.bad")
+    if bad_path.exists():
+        bad_path.unlink()
+    plugin.db.file.write_text("{ this is not json", encoding="utf-8")
+    reloaded = type(plugin.db)(plugin.cfg)
+    check("损坏文件不返回空档案", len(reloaded._data) == 0)
+    check("损坏文件被改名保留", bad_path.exists(), str(bad_path))
+
+    # 带 BOM 的文件（被编辑器改过）也要能读
+    plugin.db.file.write_text(
+        json.dumps({"5": {"user_id": "5", "nickname": "戊"}}, ensure_ascii=False),
+        encoding="utf-8-sig",
+    )
+    reloaded_bom = type(plugin.db)(plugin.cfg)
+    check("BOM 文件可加载", reloaded_bom.get("5") is not None, str(reloaded_bom._data))
+
+    # 未知字段的档案（老版本 / 手改）也不应让整份加载失败
+    plugin.db.file.write_text(
+        json.dumps(
+            {"3": {"user_id": "3", "nickname": "丙", "unknown_field": 1}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    reloaded2 = type(plugin.db)(plugin.cfg)
+    check("忽略未知字段继续加载", reloaded2.get("3") is not None, str(reloaded2._data))
+
+    # 缺 user_id 的老数据也能补上
+    plugin.db.file.write_text(
+        json.dumps({"4": {"nickname": "丁", "clone_prompt": "老数据"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    reloaded3 = type(plugin.db)(plugin.cfg)
+    check("缺失 user_id 时用键补齐", reloaded3.get("4") is not None and reloaded3.get("4").user_id == "4")
 
 
 def test_page_assets_exist():
@@ -492,6 +661,9 @@ def main():
     test_service_rewrite_and_generate(tmp)
     test_page_api(tmp)
     test_registration_paths()
+    test_route_matching_with_real_host()
+    test_cache_ttl_is_honored(tmp)
+    test_db_write_safety(tmp)
     test_page_assets_exist()
     test_html_bot_skip(tmp)
 

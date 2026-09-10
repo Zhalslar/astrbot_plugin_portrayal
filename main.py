@@ -1,7 +1,4 @@
-import base64
 import time
-
-import aiohttp
 
 from astrbot.api import logger, sp
 from astrbot.api.event import filter
@@ -14,6 +11,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 )
 from astrbot.core.provider.entities import ProviderRequest
 
+from .core.bot_identity import BotIdentityStore, build_avatar_urls, download_avatar_b64
 from .core.config import PluginConfig
 from .core.db import UserProfileDB
 from .core.entry import EntryService
@@ -32,7 +30,15 @@ MAX_SAFE_PROMPT_LEN = 2000
 
 # 这些命令由各自的 @filter.command handler 处理，提示词监听器不再重复响应
 RESERVED_COMMANDS = frozenset(
-    {"查看画像", "查看克隆", "改人格", "切换人格", "恢复人格"}
+    {
+        "查看画像",
+        "查看克隆",
+        "改人格",
+        "切换人格",
+        "恢复人格",
+        "查看机器人身份",
+        "还原机器人资料",
+    }
 )
 
 
@@ -45,6 +51,10 @@ class PortrayalPlugin(Star):
         self.msg = MessageManager(self.cfg)
         self.entry_service = EntryService(self.cfg)
         self.llm = LLMService(self.cfg)
+        # 机器人自身昵称/头像的全局备份（账号级，修复「切换后昵称头像串了」）
+        self.identity = BotIdentityStore(self.cfg.bot_identity_file)
+        # 头像下载实现（实例属性，便于注入与替换）
+        self._avatar_downloader = download_avatar_b64
         # QQ 命令与 WebUI 面板共用的人格服务
         self.persona_service = PersonaService(
             self.cfg, self.db, self.llm, self.msg, self.entry_service
@@ -429,6 +439,150 @@ class PortrayalPlugin(Star):
             )
 
     # =========================
+    # 机器人身份（昵称 / 头像）同步
+    # =========================
+
+    async def _fetch_bot_avatar(self, bot_user_id: str, *, force: bool = False) -> str:
+        """下载并缓存机器人原始头像（失败返回空串，不会抛异常）"""
+        data = self.identity.load()
+        if data.avatar_b64 and not force:
+            return data.avatar_b64
+
+        avatar_b64 = await self._avatar_downloader(bot_user_id)
+        if avatar_b64:
+            self.identity.remember_original(
+                nickname="", user_id=bot_user_id, avatar_b64=avatar_b64, overwrite=force
+            )
+            logger.debug(f"已备份机器人原始头像（{len(avatar_b64) * 3 // 4} 字节）")
+        else:
+            logger.warning(
+                "备份机器人原始头像失败（已尝试多个头像源）；"
+                "还原时若头像不对，请手动设置一次"
+            )
+        return avatar_b64
+
+    async def _sync_qq_nickname(self, event: AiocqhttpMessageEvent, nickname: str) -> str:
+        """设置机器人昵称，返回错误描述（成功返回空串）"""
+        nickname = (nickname or "").strip()
+        if not nickname:
+            return "昵称为空，已跳过"
+        try:
+            await event.bot.set_qq_profile(nickname=nickname)
+        except Exception as e:
+            logger.error(f"设置机器人昵称失败：{e}")
+            return f"设置昵称失败：{e}"
+
+        # 校验是否真的生效（协议端可能限流或拒绝）
+        try:
+            info = await event.bot.get_login_info()
+            actual = str(info.get("nickname") or "").strip()
+            if actual and actual != nickname:
+                logger.warning(f"昵称可能未生效：期望 {nickname!r}，实际 {actual!r}")
+                return f"昵称可能未生效（当前仍是「{actual}」）"
+        except Exception as e:
+            logger.debug(f"校验机器人昵称失败（忽略）：{e}")
+        return ""
+
+    async def _sync_qq_avatar(
+        self,
+        event: AiocqhttpMessageEvent,
+        avatar: str,
+        *,
+        downloader=None,
+    ) -> str:
+        """设置机器人头像（avatar 可以是 base64、图片直链或 QQ 号）
+
+        优先「自己下载图片再以 base64 上传」，因为协议端从 URL 拉取图片
+        常常受网络/白名单限制；下载失败再退回让协议端自己拉。
+
+        Args:
+            downloader: 可注入的头像下载实现（默认用模块内的 download_avatar_b64）
+        """
+        fetch = downloader or download_avatar_b64
+        avatar = (avatar or "").strip()
+        if not avatar:
+            return "头像为空，已跳过"
+
+        if avatar.isdigit():
+            avatar_b64 = await fetch(avatar)
+            if not avatar_b64:
+                return "头像下载失败（已尝试多个头像源）"
+            return await self._upload_qq_avatar(event, avatar_b64)
+
+        if avatar.startswith("http://") or avatar.startswith("https://"):
+            avatar_b64 = await fetch(avatar, urls=[avatar])
+            if avatar_b64:
+                return await self._upload_qq_avatar(event, avatar_b64)
+            # 退回让协议端自己尝试拉取
+            try:
+                await event.bot.set_qq_avatar(file=avatar)
+                return ""
+            except Exception as e:
+                logger.error(f"设置机器人头像失败：{e}")
+                return f"设置头像失败：{e}"
+
+        if avatar.startswith("base64://"):
+            avatar = avatar[len("base64://") :]
+        return await self._upload_qq_avatar(event, avatar)
+
+    @staticmethod
+    async def _upload_qq_avatar(
+        event: AiocqhttpMessageEvent, avatar_b64: str
+    ) -> str:
+        try:
+            await event.bot.set_qq_avatar(file=f"base64://{avatar_b64}")
+        except Exception as e:
+            logger.error(f"上传机器人头像失败：{e}")
+            return f"设置头像失败：{e}"
+        return ""
+
+    async def _capture_bot_identity(
+        self, event: AiocqhttpMessageEvent, umo: str
+    ) -> str:
+        """切换前备份机器人原始昵称 / 头像，返回提醒文案
+
+        关键点：机器人昵称/头像是**账号级**的，所以备份只有一份（全局），
+        并且只补空缺。这样第二次切换时不会把「群友的昵称」误记成原始昵称。
+        """
+        data = self.identity.load()
+        warning = ""
+
+        try:
+            info = await event.bot.get_login_info()
+        except Exception as e:
+            logger.warning(f"获取机器人资料失败：{e}")
+            info = {}
+
+        current_nickname = str(info.get("nickname") or "").strip()
+        bot_user_id = str(info.get("user_id") or "").strip()
+
+        if not data.ready:
+            # 首次备份：如果当前昵称已经是我们自己推上去的克隆昵称，就说明
+            # 之前那次备份丢了，无法恢复真名，只能提示用户手动改一次
+            if current_nickname and data.is_clone_name(current_nickname):
+                owner = data.worn_owner(current_nickname) or {}
+                warning = (
+                    f"注意：当前机器人昵称「{current_nickname}」看起来是克隆昵称，"
+                    f"但本地没有原始昵称备份，无法自动还原。"
+                    f"请手动把机器人昵称/头像改回原样后，执行「还原机器人资料」让它记住。"
+                )
+                logger.warning(warning)
+            else:
+                self.identity.remember_original(
+                    nickname=current_nickname, user_id=bot_user_id
+                )
+                logger.info(f"已备份机器人原始昵称：{current_nickname or '(空)'}")
+
+        data = self.identity.load()
+        if bot_user_id and not data.user_id:
+            self.identity.remember_original(user_id=bot_user_id)
+
+        if data.ready and not data.avatar_ready:
+            await self._fetch_bot_avatar(data.user_id or bot_user_id)
+
+        return warning
+
+    # =========================
     # 切换 / 恢复人格
     # =========================
 
@@ -476,44 +630,8 @@ class PortrayalPlugin(Star):
             )
         ).get("persona_id")
 
-        # 切换前保存 bot 原始昵称 / 头像字节
-        saved_info = await sp.get_async(
-            scope="umo",
-            scope_id=umo,
-            key="portrayal_original_bot_info",
-            default=None,
-        )
-        if not saved_info:
-            try:
-                login_info = await event.bot.get_login_info()
-                bot_user_id = str(login_info.get("user_id", ""))
-                avatar_b64 = ""
-                if bot_user_id:
-                    avatar_url = (
-                        f"https://q4.qlogo.cn/headimg_dl?dst_uin={bot_user_id}&spec=640"
-                    )
-                    try:
-                        timeout = aiohttp.ClientTimeout(total=15)
-                        async with aiohttp.ClientSession(timeout=timeout) as session:
-                            async with session.get(avatar_url) as resp:
-                                resp.raise_for_status()
-                                avatar_bytes = await resp.read()
-                                avatar_b64 = base64.b64encode(avatar_bytes).decode()
-                    except Exception as e:
-                        logger.warning(f"下载 bot 原始头像失败：{e}")
-
-                await sp.put_async(
-                    scope="umo",
-                    scope_id=umo,
-                    key="portrayal_original_bot_info",
-                    value={
-                        "nickname": login_info.get("nickname", ""),
-                        "user_id": bot_user_id,
-                        "avatar_b64": avatar_b64,
-                    },
-                )
-            except Exception as e:
-                logger.warning(f"获取 bot 原始资料失败：{e}")
+        # 切换前备份机器人原始昵称 / 头像（全局唯一一份）
+        identity_warning = await self._capture_bot_identity(event, umo)
 
         try:
             await self.context.persona_manager.update_persona(
@@ -539,21 +657,30 @@ class PortrayalPlugin(Star):
         if force_applied_persona_id:
             force_warn_msg = "提醒：由于自定义规则，您现在切换的人格将不会生效。"
 
-        yield event.plain_result(
+        # 机器人昵称/头像是账号级的，这里会同时影响所有会话
+        self.identity.mark_worn(
+            nickname=profile.nickname,
+            user_id=profile.user_id,
+            umo=umo,
+            owner=profile.user_id,
+        )
+        nickname_error = await self._sync_qq_nickname(event, profile.nickname)
+        avatar_error = await self._sync_qq_avatar(event, profile.user_id, downloader=self._avatar_downloader)
+
+        msg = (
             f"已将当前对话切换为【{profile.nickname}】的克隆人格，对话历史已清空。"
             f"如需还原，请使用：恢复人格。{force_warn_msg}"
         )
-
-        # 同步 bot 昵称
-        await event.bot.set_qq_profile(nickname=profile.nickname)
-        logger.debug(f"已同步bot的昵称为: {profile.nickname}")
-
-        # 同步 bot 头像
-        avatar_url = (
-            f"https://q4.qlogo.cn/headimg_dl?dst_uin={profile.user_id}&spec=640"
+        if nickname_error:
+            msg += f"\n⚠️ {nickname_error}"
+        if avatar_error:
+            msg += f"\n⚠️ {avatar_error}"
+        if identity_warning:
+            msg += f"\n⚠️ {identity_warning}"
+        yield event.plain_result(msg)
+        logger.debug(
+            f"已同步机器人资料：昵称={profile.nickname!r} 头像来源=QQ{profile.user_id}"
         )
-        await event.bot.set_qq_avatar(file=avatar_url)
-        logger.debug(f"已同步bot的头像为: {avatar_url}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("恢复人格")
@@ -578,45 +705,135 @@ class PortrayalPlugin(Star):
                 umo, cid, history=[]
             )
 
-        # 还原 bot 昵称 / 头像
-        original_info = await sp.get_async(
-            scope="umo",
-            scope_id=umo,
-            key="portrayal_original_bot_info",
-            default=None,
-        )
-
+        # 还原机器人昵称 / 头像（全局备份）
+        data = self.identity.load()
         restored_nickname = ""
+        nickname_error = ""
+        avatar_error = ""
         avatar_restored = False
-        if original_info:
-            nickname = original_info.get("nickname", "")
-            avatar_b64 = original_info.get("avatar_b64", "")
-            try:
-                if nickname:
-                    await event.bot.set_qq_profile(nickname=nickname)
-                    restored_nickname = nickname
-                    logger.debug(f"已还原bot的昵称为: {nickname}")
-                if avatar_b64:
-                    # 用 base64 字节原样塞回去；不能用 dst_uin URL，
-                    # 因为那个 URL 在切换后已经指向克隆群友的头像了
-                    await event.bot.set_qq_avatar(file=f"base64://{avatar_b64}")
-                    avatar_restored = True
-                    logger.debug("已用缓存的原图还原bot头像")
-            except Exception as e:
-                logger.error(f"还原 bot 资料失败：{e}")
-            # 还原成功后清掉缓存的原始信息
-            await sp.remove_async(
-                scope="umo",
-                scope_id=umo,
-                key="portrayal_original_bot_info",
-            )
+        had_backup = data.ready
+
+        if data.nickname:
+            nickname_error = await self._sync_qq_nickname(event, data.nickname)
+            if not nickname_error:
+                restored_nickname = data.nickname
+
+        # 头像：优先用备份的原图字节；备份缺失时按机器人自己的 QQ 号重新下载。
+        # 不能用克隆群友头像地址，也不能拿「备份时的昵称」去顶——那时协议端上
+        # 挂着的很可能还是克隆头像，会直接把克隆头像又设回去。
+        if had_backup:
+            avatar_source = data.avatar_b64
+            if not avatar_source:
+                avatar_source = await self._fetch_bot_avatar(
+                    data.user_id, force=True
+                )
+            if avatar_source:
+                avatar_error = await self._sync_qq_avatar(
+                    event, avatar_source, downloader=self._avatar_downloader
+                )
+                avatar_restored = not avatar_error
+            else:
+                avatar_error = "头像原图未备份且重新下载失败"
+
+        self.identity.clear_worn(umo)
 
         msg = f"已恢复默认人格【{default_persona_id}】，对话历史已清空。"
         if restored_nickname:
-            msg += f" bot 昵称已还原为【{restored_nickname}】。"
-        if original_info and not avatar_restored:
-            msg += "（头像原图未缓存或还原失败，需手动恢复）"
-        elif not original_info:
-            msg += "（未找到原始 bot 资料缓存，昵称/头像需手动恢复）"
+            msg += f" 机器人昵称已还原为【{restored_nickname}】。"
+        if nickname_error:
+            msg += f"\n⚠️ {nickname_error}"
+        if avatar_error:
+            msg += f"\n⚠️ {avatar_error}，头像可能仍需手动恢复。"
+        if avatar_restored:
+            msg += " 头像已还原为机器人原图。"
+        if not had_backup:
+            msg += (
+                "\n⚠️ 本地没有机器人原始资料备份，昵称/头像需手动恢复；"
+                "手动改好后执行「还原机器人资料」即可让它重新记住。"
+            )
 
+        yield event.plain_result(msg)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("查看机器人身份")
+    async def show_bot_identity(self, event: AiocqhttpMessageEvent):
+        """
+        查看机器人身份
+        """
+        data = self.identity.load()
+        try:
+            info = await event.bot.get_login_info()
+        except Exception as e:
+            info = {}
+            logger.warning(f"获取机器人资料失败：{e}")
+
+        current = str(info.get("nickname") or "").strip()
+        lines = [
+            "【机器人身份备份】",
+            f"备份昵称：{data.nickname or '（未备份）'}",
+            f"备份 QQ：{data.user_id or '（未知）'}",
+            f"备份头像：{'已缓存 ' + str(len(data.avatar_b64) * 3 // 4 // 1024) + ' KB' if data.avatar_ready else '未缓存'}",
+            f"当前协议端昵称：{current or '（读取失败）'}",
+        ]
+        if data.clone_names:
+            lines.append(f"记录过的克隆昵称（{len(data.clone_names)}）：" + "、".join(list(data.clone_names)[:8]))
+        if data.worn:
+            worn = "、".join(f"{k}→{v}" for k, v in list(data.worn.items())[:5])
+            lines.append(f"会话占用：{worn}")
+
+        if current and data.is_clone_name(current):
+            owner = data.worn_owner(current) or {}
+            lines.append(
+                f"⚠️ 当前昵称是克隆昵称（来自 {owner.get('user_id', '未知')}），"
+                f"执行「恢复人格」可还原。"
+            )
+        elif data.ready and current and current != data.nickname:
+            lines.append("⚠️ 当前昵称与备份不一致，可执行「恢复人格」还原。")
+        else:
+            lines.append("✅ 当前昵称与备份一致。")
+
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("还原机器人资料")
+    async def remember_bot_identity(self, event: AiocqhttpMessageEvent):
+        """
+        还原机器人资料 —— 把「当前」昵称/头像记为机器人原始资料
+        """
+        try:
+            info = await event.bot.get_login_info()
+        except Exception as e:
+            yield event.plain_result(f"获取机器人资料失败：{e}")
+            return
+
+        nickname = str(info.get("nickname") or "").strip()
+        bot_user_id = str(info.get("user_id") or "").strip()
+        if not nickname and not bot_user_id:
+            yield event.plain_result("没有读到机器人昵称/QQ 号，无法记录")
+            return
+
+        # 先把旧的克隆昵称记录清掉，避免把「当前这个克隆昵称」当成真名
+        data = self.identity.load()
+        if nickname and data.is_clone_name(nickname):
+            yield event.plain_result(
+                f"当前昵称「{nickname}」正是我们用过的克隆昵称，"
+                f"请先在 QQ 里把机器人昵称改成真正的名字，再执行本命令。"
+            )
+            return
+
+        self.identity.remember_original(
+            nickname=nickname, user_id=bot_user_id, overwrite=True
+        )
+        avatar_b64 = await self._avatar_downloader(bot_user_id)
+        if avatar_b64:
+            self.identity.remember_original(
+                avatar_b64=avatar_b64, user_id=bot_user_id, overwrite=True
+            )
+        self.identity.clear_worn()
+
+        msg = f"已把当前资料记为机器人原始资料：昵称【{nickname or '（空）'}】。"
+        if avatar_b64:
+            msg += f" 头像已备份（{len(avatar_b64) * 3 // 4 // 1024} KB）。"
+        else:
+            msg += "\n⚠️ 头像下载失败，未备份头像。"
         yield event.plain_result(msg)

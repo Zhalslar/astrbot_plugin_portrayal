@@ -6,6 +6,7 @@ QQ 命令（main.py）与 WebUI 面板（plugin_api.py）都走这里，
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -271,6 +272,7 @@ class PersonaService:
             raise PersonaError(f"不支持的操作：{mode}")
 
         current.clone_prompt = new_content
+        current.persona_updated_at = int(time.time())
         self.db.set(current)
         logger.info(f"[面板] 已{label} {current.nickname}({user_id}) 的克隆人格")
         return PersonaEditResult(
@@ -323,6 +325,7 @@ class PersonaService:
             raise PersonaError("修改结果为空，已保留原有人格")
 
         current.clone_prompt = content
+        current.persona_updated_at = int(time.time())
         self.db.set(current)
         logger.info(f"[面板] 已重写 {current.nickname}({user_id}) 的克隆人格")
         return PersonaEditResult(
@@ -390,6 +393,7 @@ class PersonaService:
             raise PersonaError("生成结果为空，已保留原有人格")
 
         target.clone_prompt = content
+        target.persona_updated_at = int(time.time())
         self.db.set(target)
         logger.info(f"[面板] 已为 {target.nickname}({user_id}) 生成克隆人格（{mode}）")
         return GenerateResult(
@@ -406,3 +410,14 @@ class PersonaService:
         """查看某用户本地缓存了多少条聊天记录"""
         texts, groups = self.msg.iter_cached_texts(str(user_id))
         return {"user_id": str(user_id), "messages": len(texts), "groups": groups}
+
+    def cached_candidates(self) -> dict[str, Any]:
+        """缓存里有聊天记录、但本地还没有档案的群友（面板用于一键建档）"""
+        known = set(self.db.all())
+        protected = set(self.cfg.message.protected_user_ids)
+        items = [
+            {**item, "known": False, "protected": item["user_id"] in protected}
+            for item in self.msg.list_cached_users()
+            if item["user_id"] not in known
+        ]
+        return {"total": len(items), "users": items}

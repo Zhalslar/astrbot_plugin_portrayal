@@ -8,10 +8,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
+from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.web import json_response, request
+from astrbot.api.web import request
 
 from .core.persona_service import PersonaError, PersonaService
 
@@ -82,6 +82,7 @@ class PluginPageAPI:
             ("/update", "_update", ["POST"]),
             ("/generate", "_generate", ["POST"]),
             ("/cache", "_cache_info", ["GET", "POST"]),
+            ("/cached-users", "_cached_users", ["GET", "POST"]),
         ]
         for route, handler_name, methods in routes:
             context.register_web_api(
@@ -137,6 +138,7 @@ class PluginPageAPI:
         cache = self.personas.cache_info(user_id)
         clone = profile.clone_prompt.strip()
         portrait = profile.portrait.strip()
+        persona_updated_at = int(getattr(profile, "persona_updated_at", 0) or 0)
         return _ok(
             {
                 "user_id": profile.user_id,
@@ -150,6 +152,14 @@ class PluginPageAPI:
                 "portrait": portrait,
                 "portrait_len": len(portrait),
                 "timestamp": profile.timestamp,
+                "persona_updated_at": persona_updated_at,
+                # 画像生成时间早于最近一次人格修改 => 画像可能已经过时
+                "portrait_stale": bool(
+                    portrait
+                    and persona_updated_at
+                    and profile.timestamp
+                    and profile.timestamp < persona_updated_at
+                ),
                 "protected": self.personas.cfg.message.is_protected_user(user_id),
                 "cache": cache,
                 "limits": {"max_safe_len": self.personas.stats()["max_safe_len"]},
@@ -212,10 +222,22 @@ class PluginPageAPI:
         user_id = str(payload.get("user_id") or "").strip()
         if not user_id:
             return _error("缺少 user_id 参数")
+        if not user_id.isdigit():
+            return _error("QQ 号不合法")
         try:
             data = self.personas.cache_info(user_id)
         except Exception as e:
             return _error(f"读取缓存失败：{e}")
+        return _ok(data)
+
+    # ---------- 缓存里可建档的群友 ----------
+
+    async def _cached_users(self, **_: Any):
+        try:
+            data = self.personas.cached_candidates()
+        except Exception as e:
+            logger.error(f"[面板] 读取候选失败：{e}", exc_info=True)
+            return _error(f"读取候选失败：{e}")
         return _ok(data)
 
 
@@ -224,7 +246,3 @@ def register_plugin_page_api(context, plugin: Any) -> PluginPageAPI:
     api = PluginPageAPI(plugin)
     api.register(context)
     return api
-
-
-# 保留给需要直接调用处理函数的场景
-Handler = Callable[..., Any]

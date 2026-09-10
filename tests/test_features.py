@@ -142,7 +142,9 @@ def make_plugin(config=None, tmp: Path | None = None, context=None):
     cfg = copy.deepcopy(config) if config is not None else make_config()
     plugin = plugin_main.PortrayalPlugin(context or Context(), cfg)
     if tmp is not None:
-        plugin.db.file = tmp / "portrayal.json"
+        # 同时改 cfg，保证「用同一个 cfg 重新构造 DB」也指向测试目录
+        plugin.cfg.portrayal_file = tmp / "portrayal.json"
+        plugin.db.file = plugin.cfg.portrayal_file
     return plugin
 
 

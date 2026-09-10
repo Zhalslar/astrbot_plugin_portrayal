@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Any
 
 
@@ -21,6 +21,8 @@ class UserProfile:
     portrait: str = ""
     timestamp: int = 0
     clone_prompt: str = ""
+    # 最近一次修改克隆人格的时间（用于面板提示「画像可能早于当前人格」）
+    persona_updated_at: int = 0
 
     @property
     def persona_id(self) -> str:
@@ -31,7 +33,15 @@ class UserProfile:
 
     @classmethod
     def from_dict(cls, data: dict) -> "UserProfile":
-        return cls(**data)
+        """从 JSON 还原档案
+
+        只取已知字段：手改过的档案、或将来删掉字段的旧档案都不会让整份加载失败，
+        缺失的字段自然落到默认值（兼容老数据）。
+        """
+        if not isinstance(data, dict):
+            raise TypeError("profile data must be a dict")
+        allowed = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in allowed})
 
     @classmethod
     def from_qq_data(

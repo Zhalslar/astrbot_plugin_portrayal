@@ -29,7 +29,7 @@ $files = @(
     "main.py", "plugin_api.py", "_conf_schema.json", "builtin_prompts.yaml",
     "CHANGELOG.md", "README.md", "metadata.yaml", "requirements.txt",
     "core\config.py", "core\entry.py", "core\llm.py", "core\message.py",
-    "core\persona_service.py"
+    "core\persona_service.py", "core\bot_identity.py"
 )
 
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -74,7 +74,7 @@ Write-Host "[2/5] 已覆盖部署到 $Live"
 
 # 3) 校验
 $check = @("main.py", "plugin_api.py", "core\config.py", "core\llm.py", "core\message.py",
-    "core\persona_service.py", "_conf_schema.json", "builtin_prompts.yaml",
+    "core\persona_service.py", "core\bot_identity.py", "_conf_schema.json", "builtin_prompts.yaml",
     "metadata.yaml", "pages\dashboard\index.html", "pages\dashboard\app.js", "pages\dashboard\app.css")
 $bad = 0
 foreach ($f in $check) {
@@ -88,7 +88,7 @@ if ($bad -gt 0) { throw "有 $bad 个文件校验失败" }
 Write-Host "[3/5] 校验通过"
 
 # 4) 语法自检
-& $AstrBotPython -m py_compile (Join-Path $Live "main.py") (Join-Path $Live "plugin_api.py") (Join-Path $Live "core\persona_service.py")
+& $AstrBotPython -m py_compile (Join-Path $Live "main.py") (Join-Path $Live "plugin_api.py") (Join-Path $Live "core\persona_service.py") (Join-Path $Live "core\bot_identity.py")
 if ($LASTEXITCODE -ne 0) { throw "py_compile 未通过" }
 Write-Host "[4/5] 语法自检通过"
 
