@@ -110,6 +110,84 @@ class FakeEvent:
         return ("plain", text)
 
 
+class FakeConversationManager:
+    def __init__(self, cid="cid1"):
+        self.cid = cid
+        self.persona_calls: list[tuple] = []
+        self.history_cleared = 0
+
+    async def get_curr_conversation_id(self, umo):
+        return self.cid
+
+    async def update_conversation_persona_id(self, umo, pid):
+        self.persona_calls.append((umo, pid))
+
+    async def update_conversation(self, umo, cid, history=None):
+        if history == []:
+            self.history_cleared += 1
+
+
+class FakePersonaManager:
+    def __init__(self):
+        self.personas: list = []
+        self.updated: list[tuple] = []
+        self.created: list[tuple] = []
+
+    async def get_all_personas(self):
+        return list(self.personas)
+
+    async def get_persona(self, persona_id):
+        for item in self.personas:
+            if item.persona_id == persona_id:
+                return item
+        return None
+
+    async def update_persona(self, persona_id, system_prompt):
+        self.updated.append((persona_id, system_prompt))
+        return None
+
+    async def create_persona(self, persona_id, system_prompt):
+        self.created.append((persona_id, system_prompt))
+        return None
+
+
+class FakeStarContext:
+    """插件 context 的最小替身（会话 + 人格管理）"""
+
+    def __init__(self):
+        self.conversation_manager = FakeConversationManager()
+        self.persona_manager = FakePersonaManager()
+
+    def register_web_api(self, *args):
+        return None
+
+    def get_config(self, umo=None):
+        return {"provider_settings": {"default_personality": "default"}}
+
+
+def _persona_entry(plugin):
+    """给测试用的入口：模拟 `切换人格 <名字>` 的分发结果"""
+
+    async def run(event):
+        ats = [
+            str(seg.qq)
+            for seg in event.get_messages()[1:]
+            if isinstance(seg, At) and str(seg.qq).isdigit()
+        ]
+        if ats:
+            async for item in plugin.switch_persona(event):
+                yield item
+            return
+        name = plugin._persona_arg(event.message_str)
+        if not name:
+            yield event.plain_result("命令格式测试")
+            return
+        msg = await plugin._switch_named_persona(event, name)
+        yield event.plain_result(msg)
+
+    return run
+
+
 def collect(agen):
     async def run():
         return [item async for item in agen]
@@ -145,6 +223,8 @@ def make_plugin(config=None, tmp: Path | None = None, context=None):
         # 同时改 cfg，保证「用同一个 cfg 重新构造 DB」也指向测试目录
         plugin.cfg.portrayal_file = tmp / "portrayal.json"
         plugin.db.file = plugin.cfg.portrayal_file
+    # 测试入口：直接走「切换人格 <名字>」那条分发路径
+    plugin.switch_named_persona_entry = _persona_entry(plugin)
     return plugin
 
 
@@ -385,6 +465,103 @@ def test_edit_mode_prefix(tmp: Path):
     check("前缀写错时提示用法", any("正确写法" in t for _, t in out3), str(out3))
     check("前缀写错时不改库", plugin3.db.get("123").clone_prompt == "旧人格")
     check("前缀写错时不调 LLM", "edit" not in captured3)
+
+
+def test_switch_named_persona(tmp: Path):
+    print("[切换人格 <人格名>]")
+    plugin = make_plugin(None, tmp)
+    ctx = FakeStarContext()
+
+    # AstrBot 里已有的人格（非群员克隆）
+    class P:
+        def __init__(self, pid, prompt):
+            self.persona_id = pid
+            self.system_prompt = prompt
+
+    personas = [
+        P("岑知秋", "你是岑知秋，一个角色"),
+        P("岑知夏", "另一个名字相近的人格"),
+        P("宵宫", "你是宵宫"),
+        P("陈舟", "抽象老哥"),
+        P("小明_123", "群员克隆"),
+    ]
+
+    async def get_all_personas():
+        return list(personas)
+
+    async def get_persona(pid):
+        for item in personas:
+            if item.persona_id == pid:
+                return item
+        return None
+
+    ctx.persona_manager.get_all_personas = get_all_personas
+    ctx.persona_manager.get_persona = get_persona
+    plugin.context = ctx
+    plugin.db.set(UserProfile(user_id="123", nickname="小明", clone_prompt="群员克隆"))
+
+    # 参数解析
+    check("解析人格名", plugin._persona_arg("切换人格 岑知秋") == "岑知秋")
+    check("解析带引号", plugin._persona_arg("切换人格 「岑知秋」") == "岑知秋")
+    check("无参数返回空", plugin._persona_arg("切换人格") == "")
+
+    # 匹配
+    rows = [("岑知秋", "x", "AstrBot"), ("宵宫", "y", "AstrBot"), ("岑知夏", "z", "AstrBot")]
+    check("精确匹配", len(plugin._match_persona("岑知秋", rows)) == 1)
+    check("忽略大小写", len(plugin._match_persona("ABC", [("abc", "", "")])) == 1)
+    check("唯一前缀可匹配", [r[0] for r in plugin._match_persona("宵", rows)] == ["宵宫"])
+    check("多个匹配全返回", len(plugin._match_persona("岑知", rows)) == 2)
+    check("无匹配返回空", plugin._match_persona("不存在", rows) == [])
+
+    # 切到 AstrBot 自带人格
+    ev = FakeEvent("切换人格 岑知秋", [Plain("切换人格 岑知秋")])
+    out = collect(plugin.switch_named_persona_entry(ev))
+    text = out[0][1]
+    check("切换成功提示", "已把当前会话切到人格【岑知秋】" in text, text)
+    check("标明来源是 AstrBot", "来源：AstrBot" in text, text)
+    check("未改动机器人资料有说明", "昵称/头像保持不变" in text, text)
+    check("会话已切到该人格", ctx.conversation_manager.persona_calls[-1][1] == "岑知秋")
+    check("清空了历史", ctx.conversation_manager.history_cleared >= 1)
+
+    # 切到群员克隆（来自本插件）时来源标注为克隆
+    ev2 = FakeEvent("切换人格 小明_123", [Plain("切换人格 小明_123")])
+    out2 = collect(plugin.switch_named_persona_entry(ev2))
+    check("克隆来源标注", "来源：群员克隆" in out2[0][1], out2[0][1])
+    check("克隆不再提示不改资料", "昵称/头像保持不变" not in out2[0][1])
+
+    # 找不到时给出候选
+    ev3 = FakeEvent("切换人格 不存在的人", [Plain("切换人格 不存在的人")])
+    out3 = collect(plugin.switch_named_persona_entry(ev3))
+    check("找不到时给出候选", "没找到人格" in out3[0][1] and "人格列表" in out3[0][1], out3[0][1])
+
+    # 多个候选时要求写全名
+    ev4 = FakeEvent("切换人格 岑知", [Plain("切换人格 岑知")])
+    out4 = collect(plugin.switch_named_persona_entry(ev4))
+    check("歧义时要求写全名", "匹配到多个人格" in out4[0][1], out4[0][1])
+
+    # 没有参数时给出用法
+    ev5 = FakeEvent("切换人格", [Plain("切换人格")])
+    out5 = collect(plugin.switch_persona(ev5))
+    check("无参数给用法", "命令格式" in out5[0][1] and "人格列表" in out5[0][1], out5[0][1])
+
+    # 人格列表命令
+    out6 = collect(plugin.list_personas(FakeEvent("人格列表", [Plain("人格列表")])))
+    listed = out6[0][1]
+    check("列表含自带人格", "岑知秋" in listed and "[自带]" in listed, listed[:120])
+    check("列表标记克隆人格", "[克隆]" in listed and "小明_123" in listed, listed[:120])
+    check("列表给出切换用法", "切换人格 <名称>" in listed)
+
+    # 读不到人格时给出引导
+    ctx2 = FakeStarContext()
+
+    async def empty():
+        return []
+
+    ctx2.persona_manager.get_all_personas = empty
+    plugin2 = make_plugin(None, tmp)
+    plugin2.context = ctx2
+    out7 = collect(plugin2.list_personas(FakeEvent("人格列表", [Plain("人格列表")])))
+    check("无人格时引导创建", "人格设定" in out7[0][1], out7[0][1])
 
 
 def test_view_clone(tmp: Path):
@@ -699,6 +876,7 @@ def main():
     test_parsing(tmp)
     test_edit_persona(tmp)
     test_edit_mode_prefix(tmp)
+    test_switch_named_persona(tmp)
     test_view_clone(tmp)
     test_portrait_merge(tmp)
     test_llm_prompt_builders(tmp)

@@ -46,6 +46,7 @@ RESERVED_COMMANDS = frozenset(
         "查看机器人身份",
         "还原机器人资料",
         "查头像",
+        "人格列表",
     }
 )
 
@@ -698,7 +699,12 @@ class PortrayalPlugin(Star):
     @filter.command("切换人格")
     async def switch_persona(self, event: AiocqhttpMessageEvent):
         """
-        切换人格 @群友
+        切换人格 @群友 | 切换人格 <人格名或 ID>
+
+        - `切换人格 @群友`：切到该群友的克隆人格，并同步机器人昵称/头像
+        - `切换人格 <人格名或 ID>`：切到**任意已有人格**（AstrBot 里自带的人格、
+          其它插件建的人格、本插件克隆出来的人格都行），**不改**机器人昵称/头像
+        - `人格列表`：列出可切的人格
 
         人格是**会话级**绑定：只切当前会话，别的群不会跟着变
         （哪个群要用，就在哪个群执行一次）。
@@ -708,8 +714,20 @@ class PortrayalPlugin(Star):
             for seg in event.get_messages()[1:]
             if isinstance(seg, At) and str(seg.qq).isdigit()
         ]
+
+        # 不含 @时，按「人格名 / 人格 ID」处理
         if not ats:
-            yield event.plain_result("命令格式：切换人格 @群友")
+            name = self._persona_arg(event.message_str)
+            if not name:
+                yield event.plain_result(
+                    "命令格式：\n"
+                    "  切换人格 @群友      —— 切到该群友的克隆人格（并同步机器人昵称/头像）\n"
+                    "  切换人格 <人格名>   —— 切到任意已有人格（含 AstrBot 自带人格）\n"
+                    "  人格列表            —— 看看有哪些可以切"
+                )
+                return
+            msg = await self._switch_named_persona(event, name)
+            yield event.plain_result(msg)
             return
 
         target_id = ats[0]
@@ -746,6 +764,159 @@ class PortrayalPlugin(Star):
                 event, profile, umo, cid, force_applied_persona_id
             )
         yield event.plain_result(result)
+
+    # ---------- 切到任意人格 ----------
+
+    @staticmethod
+    def _persona_arg(message_str: str) -> str:
+        """从 `切换人格 xxx` 里取出人格名/ID"""
+        parts = (message_str or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            return ""
+        return parts[1].strip().strip("「」\"'")
+
+    async def _list_all_personas(self) -> list[tuple[str, str, str]]:
+        """列出可切的人格：[(persona_id, 摘要, 来源)]"""
+        rows: list[tuple[str, str, str]] = []
+        try:
+            personas = await self.context.persona_manager.get_all_personas() or []
+        except Exception as e:
+            logger.error(f"读取人格列表失败：{e}")
+            personas = []
+
+        for persona in personas:
+            pid = str(getattr(persona, "persona_id", "") or "").strip()
+            if not pid:
+                continue
+            prompt = (getattr(persona, "system_prompt", "") or "").strip()
+            head = prompt.replace("\n", " ")[:24]
+            rows.append((pid, head, "AstrBot"))
+        return rows
+
+    @staticmethod
+    def _match_persona(
+        name: str, rows: list[tuple[str, str, str]]
+    ) -> list[tuple[str, str, str]]:
+        """按「精确 ID → 忽略大小写 → 前缀 → 包含」匹配人格
+
+        精确命中优先；否则返回**所有**前缀/包含命中，由调用方判断是否存在歧义
+        （例如「岑知」同时命中「岑知秋」「岑知夏」时，应提示写全名而不是随便选一个）。
+        """
+        key = name.strip()
+        lowered = key.lower()
+        for picker in (
+            lambda r: r[0] == key,
+            lambda r: r[0].lower() == lowered,
+        ):
+            exact = [r for r in rows if picker(r)]
+            if exact:
+                return exact
+        for picker in (
+            lambda r: r[0].lower().startswith(lowered),
+            lambda r: lowered in r[0].lower(),
+        ):
+            hit = [r for r in rows if picker(r)]
+            if hit:
+                return hit
+        return []
+
+    async def _switch_named_persona(
+        self, event: AiocqhttpMessageEvent, name: str
+    ) -> str:
+        """按名字/ID 切到任意已有人格（不改机器人昵称头像）"""
+        chosen_id = ""
+        chosen_prompt = ""
+        source = "AstrBot"
+
+        rows = await self._list_all_personas()
+        if not rows:
+            return "没有读到任何人格，请先在 AstrBot 的「人格设定」里创建人格"
+
+        matched = self._match_persona(name, rows)
+        if not matched:
+            hint = "、".join(r[0] for r in rows[:8])
+            more = "…" if len(rows) > 8 else ""
+            return (
+                f"没找到人格「{name}」。\n可用人格：{hint}{more}\n"
+                f"发送「人格列表」看完整列表。"
+            )
+        if len(matched) > 1:
+            hint = "、".join(r[0] for r in matched[:8])
+            return f"「{name}」匹配到多个人格，请写完整名称：{hint}"
+
+        chosen_id, _head, source = matched[0]
+
+        # 被本插件克隆过的人格：把库里的最新内容推上去（与「切换人格 @群友」一致）
+        cloned = None
+        for profile in self.db.all().values():
+            if profile.persona_id == chosen_id and profile.clone_prompt.strip():
+                cloned = profile
+                break
+        if cloned is not None:
+            source = "群员克隆"
+            chosen_prompt = cloned.clone_prompt
+        else:
+            try:
+                persona = await self.context.persona_manager.get_persona(chosen_id)
+                chosen_prompt = (getattr(persona, "system_prompt", "") or "").strip()
+            except Exception:
+                chosen_prompt = ""
+
+        umo = event.unified_msg_origin
+        cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
+        if not cid:
+            return "当前没有对话，请先开始对话或使用 /new 创建一个对话。"
+
+        async with self._identity_lock_for():
+            if chosen_prompt:
+                try:
+                    await self.context.persona_manager.update_persona(
+                        persona_id=chosen_id, system_prompt=chosen_prompt
+                    )
+                except ValueError:
+                    await self.context.persona_manager.create_persona(
+                        persona_id=chosen_id, system_prompt=chosen_prompt
+                    )
+            await self.context.conversation_manager.update_conversation_persona_id(
+                umo, chosen_id
+            )
+            await self.context.conversation_manager.update_conversation(
+                umo, cid, history=[]
+            )
+
+        msg = (
+            f"已把当前会话切到人格【{chosen_id}】（来源：{source}），对话历史已清空。\n"
+            f"恢复默认人格请发送：恢复人格"
+        )
+        if cloned is None:
+            msg += "\n（该人格不是群员克隆，机器人的 QQ 昵称/头像保持不变）"
+        return msg
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("人格列表")
+    async def list_personas(self, event: AiocqhttpMessageEvent):
+        """
+        人格列表 —— 列出可切换的人格
+        """
+        rows = await self._list_all_personas()
+        if not rows:
+            yield event.plain_result(
+                "没有读到人格。可在 AstrBot 的「人格设定」里新建，"
+                "或用「克隆人格 @群友」创建。"
+            )
+            return
+
+        clone_ids = {
+            p.persona_id for p in self.db.all().values() if p.clone_prompt.strip()
+        }
+        lines = [f"可用人格（{len(rows)}）："]
+        for pid, head, _source in rows[:40]:
+            tag = "克隆" if pid in clone_ids else "自带"
+            lines.append(f"  [{tag}] {pid} —— {head}")
+        if len(rows) > 40:
+            lines.append(f"  …还有 {len(rows) - 40} 个")
+        lines.append("切换：切换人格 <名称>")
+        yield event.plain_result("\n".join(lines))
 
     async def _do_switch(
         self,
