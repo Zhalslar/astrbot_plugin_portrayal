@@ -107,33 +107,86 @@
     return raw;
   }
 
-  // 统一出口：优先直连（绕开宿主端点映射），失败再走桥接
-  function call(method, endpoint, params, body, fallback, fallbackErr) {
-    var direct = request(method, endpoint, params, body);
-    if (!direct) {
-      return fallback().then(unwrap(fallbackErr));
+  // 面板跑在 sandbox iframe 里（不透明源），自己 fetch 会被 CORS 拦掉，
+  // 所以**以宿主桥接为主**（宿主的 HTTP 客户端带 Authorization），直连只作为兜底。
+  // 另外：从插件详情页进入时宿主可能给出「作者/插件名」，拼出的路由匹配不上，
+  // 因此遇到「未找到该路由」时换一种前缀再试一次。
+  function messageOf(err) {
+    return String((err && err.message) || err || "");
+  }
+
+  function isRouteMiss(err) {
+    var m = messageOf(err);
+    return m.indexOf("未找到该路由") >= 0 || m.indexOf("Not Found") >= 0;
+  }
+
+  function call(method, endpoint, params, body, viaBridge, viaDirect, fallbackErr) {
+    function run(ep) {
+      return viaBridge(ep).then(unwrap(fallbackErr));
     }
-    return direct
-      .then(unwrap(fallbackErr))
-      .catch(function (err) {
-        // 直连失败（例如宿主将来改了接口前缀）时退回桥接
-        return fallback()
-          .then(unwrap(fallbackErr))
-          .catch(function () {
-            throw err;
-          });
-      });
+
+    return run(endpoint).catch(function (err) {
+      // 路由没命中：换用「短名 / 长名」另一种插件前缀再试
+      var alt = alternativeEndpoint(endpoint);
+      if (isRouteMiss(err) && alt) {
+        return run(alt).catch(function (err2) {
+          if (isRouteMiss(err2)) {
+            var d = viaDirect ? viaDirect(endpoint) : null;
+            if (d) return d.then(unwrap(fallbackErr));
+          }
+          throw err2;
+        });
+      }
+      // 桥接本身不可用（例如桥接缺失）：退回直连（同源打开页面时可用）
+      var direct = viaDirect ? viaDirect(endpoint) : null;
+      if (direct) {
+        return direct.then(unwrap(fallbackErr)).catch(function () {
+          throw err;
+        });
+      }
+      throw err;
+    });
+  }
+
+  // 在「短名」与「作者/短名、作者_短名」之间切换一次
+  function alternativeEndpoint(endpoint) {
+    var parts = String(endpoint).split("/");
+    if (parts.length < 2) return "";
+    var name = parts.shift();
+    var tail = parts.join("/");
+    if (name === PLUGIN) {
+      var long = longPluginName();
+      return long && long !== name ? long + "/" + tail : "";
+    }
+    return PLUGIN + "/" + tail;
+  }
+
+  function longPluginName() {
+    try {
+      var api = window.AstrBotPluginPage;
+      var ctx = api && typeof api.getContext === "function" ? api.getContext() : null;
+      if (ctx && typeof ctx.pluginName === "string" && ctx.pluginName.indexOf("/") > 0) {
+        return ctx.pluginName;
+      }
+    } catch (e) {
+      /* 忽略 */
+    }
+    return "";
   }
 
   var api = {
     overview: function () {
+      var ep = pluginName() + "/overview";
       return call(
         "GET",
-        pluginName() + "/overview",
+        ep,
         null,
         undefined,
-        function () {
-          return bridge().apiGet(pluginName() + "/overview");
+        function (e) {
+          return bridge().apiGet(e);
+        },
+        function (e) {
+          return request("GET", e);
         },
         "读取总览失败"
       );
@@ -145,54 +198,68 @@
         if (v === "" || v === null || v === undefined || v === false) return;
         q[k] = v === true ? "1" : String(v);
       });
+      var ep = pluginName() + "/users";
       return call(
         "GET",
-        pluginName() + "/users",
+        ep,
         q,
         undefined,
-        function () {
-          return bridge().apiGet(pluginName() + "/users", q);
+        function (e) {
+          return bridge().apiGet(e, q);
+        },
+        function (e) {
+          return request("GET", e, q);
         },
         "读取列表失败"
       );
     },
     user: function (uid) {
-      var ep = pluginName() + "/user/" + encodeURIComponent(uid);
+      var tail = "/user/" + encodeURIComponent(uid);
+      var ep = pluginName() + tail;
       return call(
         "GET",
         ep,
         null,
         undefined,
-        function () {
-          return bridge().apiGet(ep);
+        function (e) {
+          return bridge().apiGet(e);
+        },
+        function (e) {
+          return request("GET", e);
         },
         "读取档案失败"
       );
     },
     update: function (uid, mode, content) {
-      var ep = pluginName() + "/update";
       var payload = { user_id: uid, mode: mode, content: content };
+      var ep = pluginName() + "/update";
       return call(
         "POST",
         ep,
         null,
         payload,
-        function () {
-          return bridge().apiPost(ep, payload);
+        function (e) {
+          return bridge().apiPost(e, payload);
+        },
+        function (e) {
+          return request("POST", e, null, payload);
         },
         "保存失败"
       );
     },
     generate: function (uid, mode) {
-      var ep = pluginName() + "/generate";
       var payload = { user_id: uid, mode: mode };
+      var ep = pluginName() + "/generate";
       return call(
         "POST",
         ep,
         null,
         payload,
-        function () {
-          return bridge().apiPost(ep, payload);
+        function (e) {
+          return bridge().apiPost(e, payload);
+        },
+        function (e) {
+          return request("POST", e, null, payload);
         },
         "生成失败"
       );
@@ -204,8 +271,11 @@
         ep,
         null,
         undefined,
-        function () {
-          return bridge().apiGet(ep);
+        function (e) {
+          return bridge().apiGet(e);
+        },
+        function (e) {
+          return request("GET", e);
         },
         "读取缓存候选失败"
       );
@@ -366,6 +436,44 @@
     });
   }
 
+  // 自检上报：把「解析到的插件名 / 实际接口 / 最终错误」发给插件，便于远程排查
+  App.prototype.reportDiag = function (info) {
+    try {
+      var payload = {
+        pluginName: pluginName(),
+        fromContext: (function () {
+          try {
+            var api = window.AstrBotPluginPage;
+            var ctx = api && api.getContext ? api.getContext() : null;
+            return ctx && ctx.pluginName ? String(ctx.pluginName) : "";
+          } catch (e) {
+            return "err:" + e.message;
+          }
+        })(),
+        hasToken: !!assetToken(),
+        href: String(window.location.href).slice(0, 200),
+        hasBridge: !!(window.AstrBotPluginPage && window.AstrBotPluginPage.apiGet),
+        ua: navigator.userAgent.slice(0, 80),
+      };
+      Object.keys(info || {}).forEach(function (k) {
+        payload[k] = info[k];
+      });
+      var ep = pluginName() + "/diag";
+      var viaBridge = function () {
+        return bridge().apiPost(ep, payload);
+      };
+      var viaDirect = function () {
+        var r = request("POST", ep, null, payload);
+        return r || Promise.resolve(null);
+      };
+      return viaBridge().catch(function () {
+        return viaDirect();
+      }).catch(function () {});
+    } catch (e) {
+      /* 自检失败不影响使用 */
+    }
+  };
+
   App.prototype.load = function () {
     var self = this;
     this.state.loading = true;
@@ -410,6 +518,7 @@
         }
 
         if (failures.length) {
+          self.reportDiag({ stage: "load", failures: failures });
           self.status("部分数据加载失败", "error");
           failures.forEach(function (f) {
             self.toast(f, "error");
@@ -423,6 +532,7 @@
       })
       .catch(function (err) {
         self.state.loading = false;
+        self.reportDiag({ stage: "catch", error: String((err && err.message) || err) });
         self.fail(err, "加载面板数据失败");
       });
   };
@@ -1085,6 +1195,7 @@
       });
     }
 
+    app.reportDiag({ stage: "boot" });
     app.load();
     app.loadCachedUsers();
   }

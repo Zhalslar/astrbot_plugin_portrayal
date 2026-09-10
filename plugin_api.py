@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,7 @@ class PluginPageAPI:
             ("/cache", "_cache_info", ["GET", "POST"]),
             ("/cached-users", "_cached_users", ["GET", "POST"]),
             ("/ping", "_ping", ["GET", "POST"]),
+            ("/diag", "_diag", ["GET", "POST"]),
         ]
         for route, handler_name, methods in routes:
             context.register_web_api(
@@ -307,6 +309,17 @@ class PluginPageAPI:
             },
             message="pong",
         )
+
+
+    async def _diag(self, **_: Any):
+        """接收面板前端上报的自检信息，写到 panel_debug.log 供排查"""
+        payload = await _payload()
+        try:
+            detail = json.dumps(payload, ensure_ascii=False)[:1500]
+        except Exception:
+            detail = repr(payload)[:1000]
+        self._trace(f"FRONTEND {detail}")
+        return _ok({"received": True})
 
 
 def register_plugin_page_api(context, plugin: Any) -> PluginPageAPI:

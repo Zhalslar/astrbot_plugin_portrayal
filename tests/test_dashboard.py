@@ -265,7 +265,7 @@ def test_page_api(tmp: Path):
     api = plugin.page_api
     check("面板接口 已注册", api is not None)
     routes = {r[0] for r in getattr(ctx, "registered_web_apis", [])}
-    check("构造时注册了路由", len(routes) == 8, str(sorted(routes)))
+    check("构造时注册了路由", len(routes) == 9, str(sorted(routes)))
 
     def call(coro):
         return asyncio.run(coro)
@@ -383,6 +383,7 @@ def test_registration_paths():
         "/astrbot_plugin_portrayal/cache",
         "/astrbot_plugin_portrayal/cached-users",
         "/astrbot_plugin_portrayal/ping",
+        "/astrbot_plugin_portrayal/diag",
     }
     check("路由 全覆盖", expected.issubset(set(routes)), str(sorted(routes)))
     check("路由 方法齐全", all(r[2] for r in registered))
