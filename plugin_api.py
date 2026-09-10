@@ -300,6 +300,7 @@ class PluginPageAPI:
             {
                 "plugin": PLUGIN_NAME,
                 "request_path": request.path,
+                "path_params": dict(request.path_params),
                 "query": dict(request.query),
                 "caller": request.username,
                 "registered": paths,

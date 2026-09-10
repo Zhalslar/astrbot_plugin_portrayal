@@ -9,16 +9,29 @@
   var PAGE_SIZE = 50;
 
   // ---------------------------------------------------------------- bridge
-  // 运行期插件名优先（宿主 context 里带），退回常量
+  // 运行期插件名优先（宿主 context 里带），退回常量。
+  // 宿主可能给出 "作者/插件名" 或 "作者_插件名" 这类带前缀的标识，而插件接口
+  // 注册用的是纯插件目录名，所以这里统一取最后一段，避免拼出匹配不上的路由。
   function pluginName() {
+    var raw = "";
     try {
       var api = window.AstrBotPluginPage;
       var ctx = api && typeof api.getContext === "function" ? api.getContext() : null;
-      if (ctx && typeof ctx.pluginName === "string" && ctx.pluginName) return ctx.pluginName;
+      if (ctx && typeof ctx.pluginName === "string") raw = ctx.pluginName;
     } catch (e) {
-      /* 忽略，用常量兜底 */
+      raw = "";
     }
-    return PLUGIN;
+    if (!raw) {
+      try {
+        var m = window.location.pathname.match(/\/content\/([^/]+)\//);
+        if (m && m[1]) raw = decodeURIComponent(m[1]);
+      } catch (e) {
+        raw = "";
+      }
+    }
+    if (!raw) raw = PLUGIN;
+    var last = String(raw).split("/").pop() || "";
+    return last || PLUGIN;
   }
 
   function bridge() {
