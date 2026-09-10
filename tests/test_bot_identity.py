@@ -587,19 +587,41 @@ def test_switch_and_restore_flow(tmp: Path):
     plugin3 = _isolate(tmp, "flow3")
     _wire(plugin3)
     plugin3.db.set(UserProfile(user_id="789", nickname="小刚", clone_prompt="人格"))
-    bot3 = FakeBot(nickname="真机器人", user_id="999")
-    bot3.nickname_after_set = "真机器人"
+    b3 = FakeBot(nickname="真机器人", user_id="999")
+    b3.nickname_after_set = "真机器人"  # 模拟协议端回读仍是旧值（缓存）
     out3 = collect(
         plugin3.switch_persona(
-            FakeEvent("切换人格 @用户", [Plain("切换人格 "), At("789")], bot=bot3)
+            FakeEvent("切换人格 @用户", [Plain("切换人格 "), At("789")], bot=b3)
         )
     )
-    check("昵称未生效有提示", "昵称未生效" in out3[0][1], out3[0][1])
-    check("昵称未生效不登记占用", plugin3.identity.load().worn == {})
+    # 回读不一致只当参考（协议端 get_login_info 可能是缓存），不阻断头像同步
+    check("昵称已设置并登记占用", plugin3.identity.load().worn != {})
     check(
-        "昵称未生效不同步头像",
-        [c for c in bot3.calls if c[0] == "set_qq_avatar"] == [],
+        "昵称回读不一致仍同步头像",
+        [c for c in b3.calls if c[0] == "set_qq_avatar"] != [],
+        str([c for c in b3.calls if c[0] == "set_qq_avatar"])[:60],
     )
+    check("回读不一致不报失败", "未生效" not in out3[0][1], out3[0][1])
+
+
+def test_avatar_sync_independent_of_nickname(tmp: Path):
+    print("[头像同步独立于昵称回读]")
+    from portrayal_plugin.core.model import UserProfile
+
+    plugin = _isolate(tmp, "indep")
+    _wire(plugin)
+    plugin.db.set(UserProfile(user_id="123", nickname="小明", clone_prompt="人格"))
+
+    bot = FakeBot(nickname="旧昵称", user_id="999")
+    bot.nickname_after_set = "旧昵称"  # 回读永远是旧值
+    out = collect(
+        plugin.switch_persona(
+            FakeEvent("切换人格 @用户", [Plain("切换人格 "), At("123")], bot=bot)
+        )
+    )
+    got = [c[1] for c in bot.calls if c[0] == "set_qq_avatar"]
+    check("回读旧昵称时仍上传头像", got == [f"base64://{PERSONA_AVATAR}"], str(got)[:70])
+    check("回执不再把回读差异当失败", "未生效" not in out[0][1], out[0][1])
 
 
 def test_show_identity(tmp: Path):
@@ -719,6 +741,7 @@ def main():
     test_restore_honesty(tmp)
     test_remember_requires_confirm(tmp)
     test_switch_and_restore_flow(tmp)
+    test_avatar_sync_independent_of_nickname(tmp)
     test_show_identity(tmp)
     test_sync_helpers(tmp)
     test_pending_restore_completes(tmp)

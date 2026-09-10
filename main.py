@@ -1,5 +1,6 @@
 import asyncio
 import time
+from typing import Any
 
 from astrbot.api import logger, sp
 from astrbot.api.event import filter
@@ -44,6 +45,7 @@ RESERVED_COMMANDS = frozenset(
         "恢复人格",
         "查看机器人身份",
         "还原机器人资料",
+        "查头像",
     }
 )
 
@@ -537,18 +539,39 @@ class PortrayalPlugin(Star):
         if not nickname:
             return "昵称为空，已跳过"
         try:
-            await event.bot.set_qq_profile(nickname=nickname)
+            raw = await event.bot.set_qq_profile(nickname=nickname)
+            logger.info(f"set_qq_profile({nickname!r}) -> {raw!r}")
         except Exception as e:
             logger.error(f"设置机器人昵称失败：{e}")
             return f"设置昵称失败：{e}"
 
-        # 校验是否真的生效（协议端可能限流或拒绝）
-        info = await self._read_login_info(event)
-        actual = str(info.get("nickname") or "").strip()
+        # 协议端把失败放在返回体里（status != ok / retcode != 0）时也要报出来
+        hint = ""
+        if isinstance(raw, dict):
+            status = str(raw.get("status") or "").lower()
+            retcode = raw.get("retcode")
+            message = str(raw.get("message") or raw.get("wording") or "")
+            if (status and status != "ok") or (retcode not in (None, 0)):
+                hint = f"（协议端 status={status or '-'} retcode={retcode} {message}）"
+
+        # 回读只作参考，**不据此判定失败**：部分协议实现（如 NapCat）的
+        # get_login_info 会返回缓存里的旧昵称，会出现「改名其实成功了但回读还是旧值」
+        # 的假阴性；据此判失败会连带跳过头像同步，导致「昵称变了头像不变」。
+        actual = ""
+        for _ in range(3):
+            info = await self._read_login_info(event)
+            actual = str(info.get("nickname") or "").strip()
+            if not actual or actual == nickname:
+                break
+            await asyncio.sleep(0.5)
+
         if actual and actual != nickname:
-            logger.warning(f"昵称可能未生效：期望 {nickname!r}，实际 {actual!r}")
-            return f"昵称未生效（当前仍是「{actual}」）"
-        return ""
+            logger.info(
+                f"昵称回读为 {actual!r}（期望 {nickname!r}）：可能是协议端缓存，"
+                f"已按设置成功处理{hint}"
+            )
+            return ""
+        return f"昵称已设置但协议端提示异常{hint}" if hint else ""
 
     async def _sync_qq_avatar(self, event: AiocqhttpMessageEvent, avatar: str) -> str:
         """设置机器人头像（avatar 可以是已确认的 base64 或图片直链）
@@ -758,21 +781,24 @@ class PortrayalPlugin(Star):
         if force_applied_persona_id:
             force_warn_msg = "提醒：由于自定义规则，您现在切换的人格将不会生效。"
 
-        # 昵称：改成功后登记「正在穿的名字」，避免把没生效的当成占用
+        # 昵称与头像是两件独立的事：任何一个出问题都不该阻断另一个
+        # （曾因为「昵称回读不一致」跳过头像同步，导致「昵称变了但头像不变」）
         nickname_error = await self._sync_qq_nickname(event, profile.nickname)
-        if not nickname_error:
-            self.identity.mark_worn(
-                nickname=profile.nickname, umo=umo, owner=profile.user_id
-            )
+        self.identity.mark_worn(
+            nickname=profile.nickname, umo=umo, owner=profile.user_id
+        )
 
         # 头像：用群友自己的头像（这是克隆的一部分），下载后以 base64 上传
         avatar_error = ""
-        if not nickname_error:
-            avatar_b64 = await self._download_avatar(profile.user_id)
-            if avatar_b64:
-                avatar_error = await self._sync_qq_avatar(event, avatar_b64)
-            else:
-                avatar_error = "群友头像下载失败，头像未同步"
+        avatar_b64 = await self._download_avatar(profile.user_id)
+        if avatar_b64:
+            avatar_error = await self._sync_qq_avatar(event, avatar_b64)
+        else:
+            avatar_error = (
+                "群友头像下载失败（已尝试 qlogo 两个源），头像未同步；"
+                "可在日志里搜索「头像下载」查看原因"
+            )
+            logger.warning(f"群友头像下载失败：{profile.user_id}")
 
         msg = (
             f"已将当前对话切换为【{profile.nickname}】的克隆人格，对话历史已清空。"
@@ -908,6 +934,59 @@ class PortrayalPlugin(Star):
             lines.append(
                 "ℹ️ 头像原图未备份：请手动把头像改回原图，再执行「还原机器人资料 确认」。"
             )
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("查头像")
+    async def check_avatar(self, event: AiocqhttpMessageEvent):
+        """
+        查头像 @群友 —— 诊断：下载该群友头像并尝试设置，报告协议端原始返回
+        """
+        ats = [
+            str(seg.qq)
+            for seg in event.get_messages()[1:]
+            if isinstance(seg, At) and str(seg.qq).isdigit()
+        ]
+        if not ats:
+            yield event.plain_result("命令格式：查头像 @群友")
+            return
+        uid = ats[0]
+        info = await self._read_login_info(event)
+
+        # 1) 下载测试
+        avatar_b64 = await self._download_avatar(uid)
+        if not avatar_b64:
+            yield event.plain_result(
+                f"❌ 下载 {uid} 的头像失败（qlogo 两个源都没拿到图片，详见日志「头像下载」）"
+            )
+            return
+        size_kb = len(avatar_b64) * 3 // 4 // 1024
+
+        # 2) 上传测试（拿原始返回）
+        raw: Any = None
+        err = ""
+        try:
+            raw = await event.bot.set_qq_avatar(file=f"base64://{avatar_b64}")
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+
+        # 3) 回读当前资料
+        after = await self._read_login_info(event)
+        lines = [
+            f"当前机器人昵称：{str(info.get('nickname') or '（读取失败）')}",
+            f"下载 {uid} 头像：成功（{size_kb} KB）",
+            f"set_qq_avatar 返回：{raw if raw is not None else ('异常 ' + err)}",
+        ]
+        if isinstance(raw, dict):
+            lines.append(
+                f"  status={raw.get('status')} retcode={raw.get('retcode')} "
+                f"message={raw.get('message') or raw.get('wording') or ''}"
+            )
+        lines.append(f"回读机器人昵称：{str(after.get('nickname') or '（读取失败）')}")
+        lines.append(
+            "提示：协议端返回 ok 但 QQ 头像没变时，通常是实现/账号限制；"
+            "可到 QQ 客户端确认，或在协议端后台看调用记录。"
+        )
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
