@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
@@ -88,10 +90,49 @@ class PluginPageAPI:
         for route, handler_name, methods in routes:
             context.register_web_api(
                 f"/{PLUGIN_NAME}{route}",
-                getattr(self, handler_name),
+                self._logged(handler_name, getattr(self, handler_name)),
                 methods,
                 f"Plugin Page: {PLUGIN_NAME}{route}",
             )
+
+    def _logged(self, name: str, handler):
+        """包一层请求日志，便于排查「接口无响应 / 未找到该路由」
+
+        只记录被调用到的路径与参数名（不含内容），写到插件数据目录，
+        面板刷新一次就能看出浏览器实际打到哪个 URL。
+        """
+
+        async def wrapper(**kwargs):
+            started = time.time()
+            try:
+                path = request.path
+                query = dict(request.query)
+            except Exception as e:  # pragma: no cover - 脱离请求上下文
+                path, query = f"<no request context: {e}>", {}
+            self._trace(f"-> {name} path={path} query_keys={sorted(query)}")
+            result = handler(**kwargs)
+            if asyncio.iscoroutine(result):
+                result = await result
+            self._trace(f"<- {name} {(time.time() - started) * 1000:.0f}ms")
+            return result
+
+        wrapper.__name__ = getattr(handler, "__name__", name)
+        # 保留原函数引用，便于内省/测试分别调用与打断点
+        wrapper.__wrapped__ = handler
+        return wrapper
+
+    def _trace(self, line: str) -> None:
+        logger.info(f"[面板] {line}")
+        try:
+            data_dir = getattr(self.plugin.cfg, "data_dir", None)
+            if not data_dir:
+                return
+            log_file = Path(data_dir) / "panel_debug.log"
+            stamp = time.strftime("%m-%d %H:%M:%S")
+            with log_file.open("a", encoding="utf-8") as f:
+                f.write(f"{stamp} {line}\n")
+        except Exception:
+            pass
 
     # ---------- 总览 ----------
 
