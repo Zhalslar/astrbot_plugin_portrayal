@@ -29,6 +29,62 @@
     return api;
   }
 
+  // 页面自带的 asset_token：宿主在打开页面时以 ?asset_token=... 传入，
+  // 它同样可以授权插件接口（Bearer）。用它直连，可以绕开宿主桥接的端点映射
+  // —— 某些 AstrBot 版本的桥接只在本地登记部分端点，新增端点会被本地判为
+  // 「未找到该路由」，请求根本发不到插件。
+  function assetToken() {
+    try {
+      return new URLSearchParams(window.location.search).get("asset_token") || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function jsonBody(text, status) {
+    var data = null;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      data = null;
+    }
+    if (data) {
+      data.__status = status;
+      return data;
+    }
+    return {
+      __status: status,
+      status: "error",
+      message:
+        status >= 400 ? "插件接口返回 HTTP " + status : "插件接口返回了非 JSON 内容",
+      data: null,
+    };
+  }
+
+  // 直连插件接口；只有在直连不可用时才退回宿主桥接
+  function request(method, endpoint, params, body) {
+    var token = assetToken();
+    if (!token) return null; // 没有 token 就交给桥接
+    var url = new URL("/api/v1/plugins/extensions/" + endpoint, window.location.origin);
+    if (params && method === "GET") {
+      Object.keys(params).forEach(function (k) {
+        var v = params[k];
+        if (v === "" || v === null || v === undefined || v === false) return;
+        url.searchParams.set(k, v === true ? "1" : String(v));
+      });
+    }
+    var init = { method: method, headers: { Authorization: "Bearer " + token } };
+    if (body !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    return fetch(url.toString(), init).then(function (resp) {
+      return resp.text().then(function (text) {
+        return jsonBody(text, resp.status);
+      });
+    });
+  }
+
   // 面板可能因为平台原因丢失中文错误文案，补一句 ASCII 兜底
   function errText(err, fallback) {
     var raw = (err && err.message) || "";
@@ -38,9 +94,36 @@
     return raw;
   }
 
+  // 统一出口：优先直连（绕开宿主端点映射），失败再走桥接
+  function call(method, endpoint, params, body, fallback, fallbackErr) {
+    var direct = request(method, endpoint, params, body);
+    if (!direct) {
+      return fallback().then(unwrap(fallbackErr));
+    }
+    return direct
+      .then(unwrap(fallbackErr))
+      .catch(function (err) {
+        // 直连失败（例如宿主将来改了接口前缀）时退回桥接
+        return fallback()
+          .then(unwrap(fallbackErr))
+          .catch(function () {
+            throw err;
+          });
+      });
+  }
+
   var api = {
     overview: function () {
-      return bridge().apiGet(pluginName() + "/overview").then(unwrap("读取总览失败"));
+      return call(
+        "GET",
+        pluginName() + "/overview",
+        null,
+        undefined,
+        function () {
+          return bridge().apiGet(pluginName() + "/overview");
+        },
+        "读取总览失败"
+      );
     },
     users: function (params) {
       var q = {};
@@ -49,23 +132,70 @@
         if (v === "" || v === null || v === undefined || v === false) return;
         q[k] = v === true ? "1" : String(v);
       });
-      return bridge().apiGet(pluginName() + "/users", q).then(unwrap("读取列表失败"));
+      return call(
+        "GET",
+        pluginName() + "/users",
+        q,
+        undefined,
+        function () {
+          return bridge().apiGet(pluginName() + "/users", q);
+        },
+        "读取列表失败"
+      );
     },
     user: function (uid) {
-      return bridge().apiGet(pluginName() + "/user/" + encodeURIComponent(uid)).then(unwrap("读取档案失败"));
+      var ep = pluginName() + "/user/" + encodeURIComponent(uid);
+      return call(
+        "GET",
+        ep,
+        null,
+        undefined,
+        function () {
+          return bridge().apiGet(ep);
+        },
+        "读取档案失败"
+      );
     },
     update: function (uid, mode, content) {
-      return bridge()
-        .apiPost(pluginName() + "/update", { user_id: uid, mode: mode, content: content })
-        .then(unwrap("保存失败"));
+      var ep = pluginName() + "/update";
+      var payload = { user_id: uid, mode: mode, content: content };
+      return call(
+        "POST",
+        ep,
+        null,
+        payload,
+        function () {
+          return bridge().apiPost(ep, payload);
+        },
+        "保存失败"
+      );
     },
     generate: function (uid, mode) {
-      return bridge()
-        .apiPost(pluginName() + "/generate", { user_id: uid, mode: mode })
-        .then(unwrap("生成失败"));
+      var ep = pluginName() + "/generate";
+      var payload = { user_id: uid, mode: mode };
+      return call(
+        "POST",
+        ep,
+        null,
+        payload,
+        function () {
+          return bridge().apiPost(ep, payload);
+        },
+        "生成失败"
+      );
     },
     cachedUsers: function () {
-      return bridge().apiGet(pluginName() + "/cached-users").then(unwrap("读取缓存候选失败"));
+      var ep = pluginName() + "/cached-users";
+      return call(
+        "GET",
+        ep,
+        null,
+        undefined,
+        function () {
+          return bridge().apiGet(ep);
+        },
+        "读取缓存候选失败"
+      );
     },
   };
 
@@ -73,7 +203,11 @@
   function unwrap(fallback) {
     return function (res) {
       if (res && res.status === "error") {
-        throw new Error(res.message || fallback);
+        var detail = res.message || fallback;
+        if (res.__status === 401 || res.__status === 403) {
+          detail = "登录态失效，请重新登录 AstrBot 面板（" + res.__status + "）";
+        }
+        throw new Error(detail);
       }
       return res && Object.prototype.hasOwnProperty.call(res, "data") ? res.data : res;
     };
