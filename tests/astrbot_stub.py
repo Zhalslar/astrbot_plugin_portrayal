@@ -106,7 +106,45 @@ class _Star:
 
 
 class _Context:
-    pass
+    """记录 register_web_api 的调用，便于断言面板路由"""
+
+    def __init__(self, *a, **k):
+        self.registered_web_apis: list[tuple] = []
+
+    def register_web_api(self, route, view_handler, methods, desc):
+        self.registered_web_apis.append((route, view_handler, methods, desc))
+
+
+class _WebRequest:
+    """astrbot.api.web.request 的最小实现，供面板接口测试使用"""
+
+    def __init__(self):
+        self.method = "GET"
+        self.query: dict[str, str] = {}
+        self.path_params: dict[str, str] = {}
+        self.username = "tester"
+        self.plugin_name = "astrbot_plugin_portrayal"
+        self._json: Any = None
+
+    def set(self, *, method="GET", query=None, json_body=None, path_params=None):
+        self.method = method
+        self.query = dict(query or {})
+        self._json = json_body
+        self.path_params = dict(path_params or {})
+
+    async def json(self, default=None):
+        return self._json if self._json is not None else default
+
+
+WEB_REQUEST = _WebRequest()
+
+
+def _json_response(data=None, **kwargs):
+    return {"status": "ok", "message": "", "data": data}
+
+
+def _error_response(message, *, status_code=400, data=None, **kwargs):
+    return {"status": "error", "message": message, "data": data}
 
 
 class _StarTools:
@@ -189,11 +227,19 @@ def install() -> None:
         __import__("pathlib").Path(__file__).resolve().parents[2]
     )
 
+    api_web = types.ModuleType("astrbot.api.web")
+    api_web.request = WEB_REQUEST
+    api_web.json_response = _json_response
+    api_web.error_response = _error_response
+
+    api.__path__ = []  # 让 astrbot.api 成为一个包
+
     modules = {
         "astrbot": types.ModuleType("astrbot"),
         "astrbot.api": api,
         "astrbot.api.event": api_event,
         "astrbot.api.star": api_star,
+        "astrbot.api.web": api_web,
         "astrbot.core": core,
         "astrbot.core.config": core_config,
         "astrbot.core.config.astrbot_config": core_config_astrbot,

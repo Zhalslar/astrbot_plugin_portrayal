@@ -77,10 +77,17 @@ class FakeBot:
 
 
 class FakeEvent:
-    def __init__(self, message_str: str, chain: list, is_admin: bool = True):
+    def __init__(
+        self,
+        message_str: str,
+        chain: list,
+        is_admin: bool = True,
+        self_id: str = "10000",
+    ):
         self.message_str = message_str
         self._chain = chain
         self._is_admin = is_admin
+        self._self_id = self_id
         self.unified_msg_origin = "aiocqhttp:GroupMessage:999"
         self.bot = FakeBot()
 
@@ -89,6 +96,9 @@ class FakeEvent:
 
     def is_admin(self):
         return self._is_admin
+
+    def get_self_id(self):
+        return self._self_id
 
     def get_sender_id(self):
         return "10000"
@@ -127,10 +137,10 @@ def make_config(**overrides):
     return AstrBotConfig(data)
 
 
-def make_plugin(config=None, tmp: Path | None = None):
+def make_plugin(config=None, tmp: Path | None = None, context=None):
     # 每个 plugin 用独立的配置副本，避免 EntryService 回写污染其它测试
     cfg = copy.deepcopy(config) if config is not None else make_config()
-    plugin = plugin_main.PortrayalPlugin(Context(), cfg)
+    plugin = plugin_main.PortrayalPlugin(context or Context(), cfg)
     if tmp is not None:
         plugin.db.file = tmp / "portrayal.json"
     return plugin

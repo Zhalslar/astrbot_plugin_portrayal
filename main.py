@@ -20,6 +20,8 @@ from .core.entry import EntryService
 from .core.llm import LLMService
 from .core.message import MessageManager
 from .core.model import UserProfile
+from .core.persona_service import PersonaError, PersonaService
+from .plugin_api import register_plugin_page_api
 
 # 「改人格」的三种模式前缀
 APPEND_PREFIX = "追加："
@@ -27,6 +29,11 @@ RESET_PREFIX = "重置："
 
 # 超出该长度时额外提示「不建议直接群发」
 MAX_SAFE_PROMPT_LEN = 2000
+
+# 这些命令由各自的 @filter.command handler 处理，提示词监听器不再重复响应
+RESERVED_COMMANDS = frozenset(
+    {"查看画像", "查看克隆", "改人格", "切换人格", "恢复人格"}
+)
 
 
 class PortrayalPlugin(Star):
@@ -38,6 +45,16 @@ class PortrayalPlugin(Star):
         self.msg = MessageManager(self.cfg)
         self.entry_service = EntryService(self.cfg)
         self.llm = LLMService(self.cfg)
+        # QQ 命令与 WebUI 面板共用的人格服务
+        self.persona_service = PersonaService(
+            self.cfg, self.db, self.llm, self.msg, self.entry_service
+        )
+        # 注册 WebUI 面板后端（/api/plug/astrbot_plugin_portrayal/...）
+        try:
+            self.page_api = register_plugin_page_api(context, self)
+        except Exception as e:
+            self.page_api = None
+            logger.warning(f"注册 WebUI 面板接口失败（不影响聊天命令）：{e}")
 
     async def initialize(self):
         pass
@@ -67,18 +84,30 @@ class PortrayalPlugin(Star):
         Returns:
             (target_id, payload)，没有 @ 时 target_id 为空字符串。
 
-        优先取消息链里的 At 段；若客户端没有生成 At 段（例如用户直接手打 QQ 号），
-        则退化为把命令词之后第一个纯数字 token 当作目标 QQ 号。
+        优先取消息链里的 At 段，并跳过 @机器人 自身（aiocqhttp 会把
+        「@bot 改人格 @群友 …」里的第一个 At(self) 留在消息链里）；
+        若客户端没有生成 At 段（例如用户直接手打 QQ 号），则退化为把命令词
+        之后第一个纯数字 token 当作目标 QQ 号。
         """
         segments = event.get_messages()
-        ats = [str(seg.qq) for seg in segments if isinstance(seg, At)]
+        try:
+            self_id = str(event.get_self_id())
+        except Exception:
+            self_id = ""
+
+        ats = [
+            str(seg.qq)
+            for seg in segments
+            if isinstance(seg, At) and str(seg.qq) not in (self_id, "all")
+        ]
         target_id = ats[0] if ats else ""
         if target_id:
             texts: list[str] = []
             hit_at = False
             for seg in segments:
                 if isinstance(seg, At):
-                    hit_at = True
+                    # 只在遇到真正的目标 At 之后才开始收集文本
+                    hit_at = hit_at or str(seg.qq) == target_id
                     continue
                 if not hit_at:
                     continue
@@ -87,7 +116,12 @@ class PortrayalPlugin(Star):
                     texts.append(text.strip())
 
             payload = " ".join(texts).strip()
-            if payload.startswith(target_id):
+            # 部分客户端会把 @群友 渲染成 "@123" 混进正文，这里只剔除
+            # 「正好等于 QQ 号」或「QQ 号 + 空格」的前缀，避免误伤以该数字
+            # 开头的修改要求
+            if payload == target_id:
+                payload = ""
+            elif payload.startswith(f"{target_id} "):
                 payload = payload[len(target_id) :].strip()
             return target_id, payload
 
@@ -107,7 +141,11 @@ class PortrayalPlugin(Star):
         """
         查看画像 @群友
         """
-        ats = [str(seg.qq) for seg in event.get_messages()[1:] if isinstance(seg, At)]
+        ats = [
+            str(seg.qq)
+            for seg in event.get_messages()[1:]
+            if isinstance(seg, At) and str(seg.qq).isdigit()
+        ]
         if not ats:
             yield event.plain_result("命令格式：查看画像 @群友")
             return
@@ -133,7 +171,7 @@ class PortrayalPlugin(Star):
         查看克隆 @群友
         """
         target_id, _ = self._split_target_and_text(event)
-        if not target_id:
+        if not target_id or not target_id.isdigit():
             yield event.plain_result("命令格式：查看克隆 @群友")
             return
         if self.cfg.message.is_protected_user(target_id):
@@ -184,6 +222,9 @@ class PortrayalPlugin(Star):
         画像 @群友 <查询轮数>
         """
         cmd = self._get_cmd(event)
+        # 内置命令有自己的 handler，即使配置里出现同名提示词条目也不要重复处理
+        if cmd in RESERVED_COMMANDS:
+            return
         prompt = self.entry_service.get_entry(cmd)
         if not prompt:
             # 容错：升级后配置里可能还没回填“重克隆人格”条目，
@@ -195,13 +236,20 @@ class PortrayalPlugin(Star):
         if prompt.need_admin and not event.is_admin():
             return
 
-        ats = [str(seg.qq) for seg in event.get_messages()[1:] if isinstance(seg, At)]
+        ats = [
+            str(seg.qq)
+            for seg in event.get_messages()[1:]
+            if isinstance(seg, At) and str(seg.qq).isdigit()
+        ]
         if not ats:
             yield event.plain_result("命令格式：画像 @群友 <查询轮数>")
             return
 
         # 检查权限
         target_id = ats[0]
+        if not target_id.isdigit():
+            yield event.plain_result("命令格式：画像 @群友 <查询轮数>")
+            return
         if self.cfg.message.is_protected_user(target_id):
             yield event.plain_result("该用户在保护名单中，不允许查询")
             return
@@ -211,8 +259,15 @@ class PortrayalPlugin(Star):
         query_rounds = self.cfg.message.get_query_rounds(end_param)
 
         # 获取基本信息（沿用旧档案里已有的画像与克隆人格，避免被空值覆盖）
-        info = await event.bot.get_stranger_info(user_id=int(target_id), no_cache=True)
-        profile = UserProfile.from_qq_data(target_id, data=dict(info))
+        try:
+            info = await event.bot.get_stranger_info(
+                user_id=int(target_id), no_cache=True
+            )
+            profile = UserProfile.from_qq_data(target_id, data=dict(info))
+        except Exception as e:
+            logger.error(f"获取用户资料失败：{e}")
+            yield event.plain_result(f"获取该用户资料失败：{e}")
+            return
         old_profile = self.db.get(target_id)
         if old_profile:
             profile.portrait = old_profile.portrait
@@ -304,7 +359,7 @@ class PortrayalPlugin(Star):
         改人格 @群友 重置：<完整人格>   —— 整段替换（无档案时自动建档）
         """
         target_id, instruction = self._split_target_and_text(event)
-        if not target_id:
+        if not target_id or not target_id.isdigit():
             yield event.plain_result(
                 "命令格式：\n"
                 "改人格 @群友 <修改要求>（LLM 重写）\n"
@@ -317,98 +372,59 @@ class PortrayalPlugin(Star):
             return
 
         profile = self.db.get(target_id)
+        is_new_profile = profile is None
 
-        # 重置模式允许目标用户还没有档案，自动拉取陌生人资料建档
-        if not profile and instruction.startswith(RESET_PREFIX):
+        # 重置模式允许目标用户还没有档案：先拉取陌生人资料，再交给服务层写入
+        if is_new_profile and instruction.startswith(RESET_PREFIX):
             try:
                 info = await event.bot.get_stranger_info(
                     user_id=int(target_id), no_cache=True
                 )
+                profile = UserProfile.from_qq_data(target_id, data=dict(info))
             except Exception as e:
                 logger.error(f"获取用户资料失败：{e}")
                 yield event.plain_result(f"获取该用户资料失败：{e}")
                 return
-            profile = UserProfile.from_qq_data(target_id, data=dict(info))
 
-        if not profile:
-            yield event.plain_result(
-                "本地暂无该用户档案，请先执行“克隆人格 @群友”；"
-                "若只想手工写入完整人格，可用“改人格 @群友 重置：<完整人格>”"
-            )
+        try:
+            if instruction.startswith(APPEND_PREFIX):
+                result = self.persona_service.apply_edit(
+                    target_id,
+                    "append",
+                    instruction[len(APPEND_PREFIX) :],
+                    profile=profile,
+                )
+            elif instruction.startswith(RESET_PREFIX):
+                # 目标还没有档案时（刚拉过陌生人资料）用 create 建档写入
+                result = self.persona_service.apply_edit(
+                    target_id,
+                    "create" if is_new_profile else "replace",
+                    instruction[len(RESET_PREFIX) :],
+                    profile=profile,
+                )
+            else:
+                result = await self.persona_service.apply_rewrite(
+                    target_id,
+                    instruction,
+                    umo=event.unified_msg_origin,
+                    profile=profile,
+                )
+        except PersonaError as e:
+            yield event.plain_result(str(e))
+            return
+        except Exception as e:
+            logger.error(f"修改人格失败：{e}", exc_info=True)
+            yield event.plain_result(f"修改失败：{e}，已保留原有人格")
             return
 
-        old_clone_prompt = profile.clone_prompt.strip()
-
-        # 模式一：追加（不走 LLM）
-        if instruction.startswith(APPEND_PREFIX):
-            add_text = instruction[len(APPEND_PREFIX) :].strip()
-            if not add_text:
-                yield event.plain_result(
-                    f"追加内容不能为空，正确用法：改人格 @{profile.nickname} 追加：<补充文字>"
-                )
-                return
-            if not old_clone_prompt:
-                yield event.plain_result(
-                    f"【{profile.nickname}】暂无可用的克隆人格，"
-                    f"请先执行“克隆人格 @{profile.nickname}”"
-                )
-                return
-            content = f"{old_clone_prompt}\n{add_text}"
-            mode_desc = "追加"
-
-        # 模式二：重置（不走 LLM）
-        elif instruction.startswith(RESET_PREFIX):
-            content = instruction[len(RESET_PREFIX) :].strip()
-            if not content:
-                yield event.plain_result(
-                    f"重置内容不能为空，正确用法：改人格 @{profile.nickname} 重置：<完整人格>"
-                )
-                return
-            mode_desc = "重置"
-
-        # 模式三：LLM 重写
-        else:
-            if not instruction:
-                yield event.plain_result(
-                    f"请补充修改要求，例如：改人格 @{profile.nickname} 说话更简短一点"
-                )
-                return
-            if not old_clone_prompt:
-                yield event.plain_result(
-                    f"【{profile.nickname}】暂无可用的克隆人格，"
-                    f"请先执行“克隆人格 @{profile.nickname}”"
-                )
-                return
-            try:
-                content = await self.llm.generate_persona_edit(
-                    old_clone_prompt,
-                    instruction,
-                    profile,
-                    self.cfg.get_edit_prompt(),
-                    umo=event.unified_msg_origin,
-                )
-            except Exception as e:
-                logger.error(f"LLM 调用失败：{e}")
-                yield event.plain_result(f"修改失败：{e}，已保留原有人格")
-                return
-            if not content or not content.strip():
-                yield event.plain_result("修改结果为空，已保留原有人格")
-                return
-            content = content.strip()
-            mode_desc = "重写"
-
-        profile.clone_prompt = content
-        profile.timestamp = int(time.time())
-        self.db.set(profile)
-
         yield event.plain_result(
-            f"【{profile.nickname}】的克隆人格已{mode_desc}（{len(content)} 字）。"
-            f"\n执行“切换人格 @{profile.nickname}”后生效。"
-            f"\n发送“查看克隆 @{profile.nickname}”可查看当前人格全文。"
+            f"【{result.nickname}】的克隆人格已{result.mode}（{result.length} 字）。"
+            f"\n执行“切换人格 @{result.nickname}”后生效。"
+            f"\n发送“查看克隆 @{result.nickname}”可查看当前人格全文。"
         )
-        if len(content) > MAX_SAFE_PROMPT_LEN:
+        if result.too_long:
             yield event.plain_result(
-                f"提示：当前人格 {len(content)} 字，超过 {MAX_SAFE_PROMPT_LEN} 字，"
+                f"提示：当前人格 {result.length} 字，超过 {MAX_SAFE_PROMPT_LEN} 字，"
                 f"不建议直接群发全文。"
             )
 
@@ -422,7 +438,11 @@ class PortrayalPlugin(Star):
         """
         切换人格 @群友
         """
-        ats = [str(seg.qq) for seg in event.get_messages()[1:] if isinstance(seg, At)]
+        ats = [
+            str(seg.qq)
+            for seg in event.get_messages()[1:]
+            if isinstance(seg, At) and str(seg.qq).isdigit()
+        ]
         if not ats:
             yield event.plain_result("命令格式：切换人格 @群友")
             return

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark light">
+    <title>人物画像 · 人格面板</title>
+    <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+    <div class="app">
+        <header class="topbar">
+            <div class="topbar-main">
+                <div class="brand">
+                    <span class="brand-dot"></span>
+                    <h1>人物画像 · 人格面板</h1>
+                </div>
+                <p class="topbar-sub">
+                    管理群友的克隆人格：追加、整段替换，或让 LLM 按你的要求重写。
+                    改完在群里执行「切换人格 @群友」即生效。
+                </p>
+            </div>
+            <div class="topbar-actions">
+                <span class="status" data-status>加载中…</span>
+                <button class="btn btn-ghost" data-reload>刷新</button>
+            </div>
+        </header>
+
+        <section class="kpis" data-kpi></section>
+
+        <section class="toolbar">
+            <input class="input search" type="search" data-search placeholder="搜索昵称 / QQ号 / 备注">
+            <label class="check"><input type="checkbox" data-only-clone> 只看已克隆</label>
+            <label class="check"><input type="checkbox" data-only-portrait> 只看有画像</label>
+            <select class="input select" data-sort>
+                <option value="nickname">按昵称</option>
+                <option value="clone_len">按人格字数</option>
+                <option value="timestamp">按更新时间</option>
+            </select>
+            <label class="check"><input type="checkbox" data-desc> 倒序</label>
+            <span class="spacer"></span>
+            <span class="pager" data-pager></span>
+        </section>
+
+        <section class="layout">
+            <div class="list-pane" data-list></div>
+            <div class="detail-pane" data-detail></div>
+        </section>
+    </div>
+
+    <div class="toasts" data-toasts></div>
+
+    <script src="./app.js"></script>
+</body>
+</html>

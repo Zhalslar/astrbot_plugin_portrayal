@@ -132,6 +132,27 @@ class MessageManager:
     # public api
     # =========================
 
+    def iter_cached_texts(self, target_id: str) -> tuple[list[str], int]:
+        """收集缓存里某个用户在所有群中的发言（供 WebUI 面板生成人格使用）
+
+        Args:
+            target_id: Target user ID.
+
+        Returns:
+            (texts, group_count)。缓存为空时返回 ([], 0)。
+        """
+        target_id = str(target_id)
+        texts: list[str] = []
+        groups = 0
+        for key, cached in self._user_cache.items():
+            group_id, _, user_id = key.partition(":")
+            if user_id != target_id or not cached.texts:
+                continue
+            groups += 1
+            texts.extend(cached.texts)
+        texts = texts[: self.cfg.max_msg_count]
+        return texts, groups
+
     async def get_user_texts(
         self,
         event: AiocqhttpMessageEvent,
