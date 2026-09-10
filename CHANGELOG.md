@@ -1,5 +1,22 @@
 # 更新日志
 
+## v1.1.20
+
+错误修复：
+
+- **面板「未找到该路由」的真正原因**：宿主桥接会**自动补插件前缀**
+  （`apiGet("stats")` → `/api/plug/<插件名>/stats`），而面板把插件名也写进了端点，
+  于是请求变成 `/api/plug/astrbot_plugin_portrayal/astrbot_plugin_portrayal/overview`
+  ——双重前缀，服务端匹配不到路由。
+  现在端点统一使用**裸路径**（`overview` / `users` / `user/<uid>` / `update` /
+  `generate` / `cached-users` / `diag`），桥接由宿主补前缀，直连由面板补前缀。
+
+对照实验（同一接口三种路径）：
+    /api/plug/<插件>/<插件>/overview    -> 未找到该路由（旧写法）
+    /api/plug/<插件>/overview           -> 200 + 数据
+    /api/v1/plugins/extensions/<插件>/overview -> 200 + 数据
+
+## v1.1.19
 ## v1.1.19
 
 错误修复：

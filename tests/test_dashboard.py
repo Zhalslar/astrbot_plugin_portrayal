@@ -630,8 +630,16 @@ def test_page_assets_exist():
         "app.js 调用插件名",
         js.count("astrbot_plugin_portrayal") >= 1,
     )
-    for route in ("/overview", "/users", "/user/", "/update", "/generate"):
-        check(f"app.js 使用 {route}", ('"%s"' % route) in js or route in js)
+    # 端点必须是**裸路径**：宿主桥接会自动补插件前缀，带前缀会变成双重前缀
+    for route in ("overview", "users", "user/", "update", "generate", "cached-users", "diag"):
+        check(f"app.js 使用裸端点 {route}", ('"%s"' % route) in js, f"缺少 {route}")
+    # 只有「直连 URL 构造」允许拼插件名；端点本身（var ep = ...）必须是裸路径
+    ep_lines = [ln.strip() for ln in js.splitlines() if ln.strip().startswith("var ep = ")]
+    check(
+        "端点不带插件名前缀",
+        ep_lines and not any("pluginName" in ln for ln in ep_lines),
+        str(ep_lines),
+    )
 
     import yaml
 

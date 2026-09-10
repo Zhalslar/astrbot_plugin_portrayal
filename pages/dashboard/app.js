@@ -21,6 +21,8 @@
     } catch (e) {
       raw = "";
     }
+    // 桥接就绪前拿不到 context，退一步用 identity 里缓存的插件名
+    if (!raw && identity && identity.pluginName) raw = identity.pluginName;
     if (!raw) {
       try {
         var m = window.location.pathname.match(/\/content\/([^/]+)\//);
@@ -75,10 +77,16 @@
   }
 
   // 直连插件接口；只有在直连不可用时才退回宿主桥接
+  // 端点统一用**裸路径**（如 "overview"、"user/123"）：
+  // 宿主桥接会自动补上插件前缀（apiGet("stats") -> /api/plug/<plugin>/stats），
+  // 如果这里再带一次插件名就会变成双重前缀，服务端必然报「未找到该路由」。
   function request(method, endpoint, params, body) {
     var token = assetToken();
     if (!token) return null; // 没有 token 就交给桥接
-    var url = new URL("/api/v1/plugins/extensions/" + endpoint, window.location.origin);
+    var url = new URL(
+      "/api/v1/plugins/extensions/" + pluginName() + "/" + endpoint,
+      window.location.origin
+    );
     if (params && method === "GET") {
       Object.keys(params).forEach(function (k) {
         var v = params[k];
@@ -109,74 +117,80 @@
 
   // 面板跑在 sandbox iframe 里（不透明源），自己 fetch 会被 CORS 拦掉，
   // 所以**以宿主桥接为主**（宿主的 HTTP 客户端带 Authorization），直连只作为兜底。
-  // 另外：从插件详情页进入时宿主可能给出「作者/插件名」，拼出的路由匹配不上，
-  // 因此遇到「未找到该路由」时换一种前缀再试一次。
-  function messageOf(err) {
-    return String((err && err.message) || err || "");
-  }
-
-  function isRouteMiss(err) {
-    var m = messageOf(err);
-    return m.indexOf("未找到该路由") >= 0 || m.indexOf("Not Found") >= 0;
-  }
-
+  //
+  // 注意：端点必须是**裸路径**（"overview" / "users" / "user/123"）。
+  // 宿主桥接会自己补插件前缀（apiGet("stats") -> /api/plug/<插件名>/stats），
+  // 端点里再写一次插件名就会变成 /api/plug/<插件名>/<插件名>/overview，
+  // 服务端会返回「未找到该路由」。
   function call(method, endpoint, params, body, viaBridge, viaDirect, fallbackErr) {
-    function run(ep) {
-      return viaBridge(ep).then(unwrap(fallbackErr));
-    }
+    return whenBridgeReady()
+      .then(function () {
+        return viaBridge(endpoint);
+      })
+      .then(unwrap(fallbackErr))
+      .catch(function (err) {
+        // 桥接不可用（例如同源直接打开页面）时退回直连
+        var direct = viaDirect ? viaDirect(endpoint) : null;
+        if (direct) {
+          return direct.then(unwrap(fallbackErr)).catch(function () {
+            throw err;
+          });
+        }
+        throw err;
+      });
+  }
 
-    return run(endpoint).catch(function (err) {
-      // 路由没命中：换用「短名 / 长名」另一种插件前缀再试
-      var alt = alternativeEndpoint(endpoint);
-      if (isRouteMiss(err) && alt) {
-        return run(alt).catch(function (err2) {
-          if (isRouteMiss(err2)) {
-            var d = viaDirect ? viaDirect(endpoint) : null;
-            if (d) return d.then(unwrap(fallbackErr));
+  // 运行期身份信息（宿主 context 里带），供端点构造使用
+  var identity = { pluginName: "" };
+
+  // 宿主的 bridge-sdk.js 是**在 app.js 之后**加载的，所以启动瞬间没有桥接。
+  // 必须等它就绪（ready() 会返回宿主 context），否则第一批请求必然失败。
+  var bridgeWait = null;
+  function whenBridgeReady() {
+    if (bridgeWait) return bridgeWait;
+    bridgeWait = new Promise(function (resolve) {
+      var deadline = Date.now() + 10000;
+      (function poll() {
+        var api = window.AstrBotPluginPage;
+        if (api && typeof api.apiGet === "function") {
+          try {
+            var ctx = typeof api.getContext === "function" ? api.getContext() : null;
+            if (ctx && ctx.pluginName) {
+              identity.pluginName = String(ctx.pluginName);
+              resolve(ctx);
+              return;
+            }
+          } catch (e) {
+            /* 继续等 */
           }
-          throw err2;
-        });
-      }
-      // 桥接本身不可用（例如桥接缺失）：退回直连（同源打开页面时可用）
-      var direct = viaDirect ? viaDirect(endpoint) : null;
-      if (direct) {
-        return direct.then(unwrap(fallbackErr)).catch(function () {
-          throw err;
-        });
-      }
-      throw err;
+          if (typeof api.ready === "function") {
+            api.ready().then(
+              function (ctx) {
+                if (ctx && ctx.pluginName) identity.pluginName = String(ctx.pluginName);
+                resolve(ctx || null);
+              },
+              function () {
+                resolve(null);
+              }
+            );
+            return;
+          }
+          resolve(null);
+          return;
+        }
+        if (Date.now() > deadline) {
+          resolve(null);
+          return;
+        }
+        setTimeout(poll, 120);
+      })();
     });
-  }
-
-  // 在「短名」与「作者/短名、作者_短名」之间切换一次
-  function alternativeEndpoint(endpoint) {
-    var parts = String(endpoint).split("/");
-    if (parts.length < 2) return "";
-    var name = parts.shift();
-    var tail = parts.join("/");
-    if (name === PLUGIN) {
-      var long = longPluginName();
-      return long && long !== name ? long + "/" + tail : "";
-    }
-    return PLUGIN + "/" + tail;
-  }
-
-  function longPluginName() {
-    try {
-      var api = window.AstrBotPluginPage;
-      var ctx = api && typeof api.getContext === "function" ? api.getContext() : null;
-      if (ctx && typeof ctx.pluginName === "string" && ctx.pluginName.indexOf("/") > 0) {
-        return ctx.pluginName;
-      }
-    } catch (e) {
-      /* 忽略 */
-    }
-    return "";
+    return bridgeWait;
   }
 
   var api = {
     overview: function () {
-      var ep = pluginName() + "/overview";
+      var ep = "overview";
       return call(
         "GET",
         ep,
@@ -198,7 +212,7 @@
         if (v === "" || v === null || v === undefined || v === false) return;
         q[k] = v === true ? "1" : String(v);
       });
-      var ep = pluginName() + "/users";
+      var ep = "users";
       return call(
         "GET",
         ep,
@@ -214,8 +228,7 @@
       );
     },
     user: function (uid) {
-      var tail = "/user/" + encodeURIComponent(uid);
-      var ep = pluginName() + tail;
+      var ep = "user/" + encodeURIComponent(uid);
       return call(
         "GET",
         ep,
@@ -232,7 +245,7 @@
     },
     update: function (uid, mode, content) {
       var payload = { user_id: uid, mode: mode, content: content };
-      var ep = pluginName() + "/update";
+      var ep = "update";
       return call(
         "POST",
         ep,
@@ -249,7 +262,7 @@
     },
     generate: function (uid, mode) {
       var payload = { user_id: uid, mode: mode };
-      var ep = pluginName() + "/generate";
+      var ep = "generate";
       return call(
         "POST",
         ep,
@@ -265,7 +278,7 @@
       );
     },
     cachedUsers: function () {
-      var ep = pluginName() + "/cached-users";
+      var ep = "cached-users";
       return call(
         "GET",
         ep,
@@ -458,9 +471,11 @@
       Object.keys(info || {}).forEach(function (k) {
         payload[k] = info[k];
       });
-      var ep = pluginName() + "/diag";
+      var ep = "diag";
       var viaBridge = function () {
-        return bridge().apiPost(ep, payload);
+        return whenBridgeReady().then(function () {
+          return bridge().apiPost(ep, payload);
+        });
       };
       var viaDirect = function () {
         var r = request("POST", ep, null, payload);
@@ -478,7 +493,8 @@
     var self = this;
     this.state.loading = true;
     self.status("加载中…");
-    Promise.resolve()
+    // 必须 return：否则链上的异常会变成未处理的 rejection，界面永远停在「加载中…」
+    return Promise.resolve()
       .then(function () {
         // 分别取数：一部分失败不影响另一部分渲染
         return Promise.allSettled([
