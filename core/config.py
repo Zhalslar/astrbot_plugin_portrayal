@@ -13,6 +13,40 @@ from astrbot.core.star.context import Context
 from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_path
 
+# 人格融合 / 人格改写的兜底文案。
+# 正常情况下这两段文案来自插件配置（WebUI 可自行修改）；
+# 只有在配置项缺失（例如升级后尚未回填）时才会退回这里。
+DEFAULT_MERGE_PROMPT = """你此前已为该群友生成过一份人格克隆提示词。
+现在基于新的聊天记录，对这份提示词进行完善融合：
+1. 保留原有内容中依然成立的性格特质、说话风格、行为习惯，不要无故改动；
+2. 仅在新的聊天记录提供明确新证据时，才修订、补充或删除相应特质；
+3. 新旧特质冲突时，以新证据为准；
+4. 保持结构清晰（说话风格 / 情绪模式 / 高频表达 / 触发反应 / 禁止项）；
+5. 融合后全文不超过原提示词的 1.2 倍且不超过 2000 字，宁可精炼不要堆砌；
+6. 只输出最终提示词正文，不要解释，不要代码块。
+用户昵称：{nickname}"""
+
+DEFAULT_EDIT_PROMPT = """你正在维护一份用于大模型“人格克隆”的系统提示词。
+请按照用户给出的修改要求，重写这份提示词，并遵守以下规则：
+1. 严格落实修改要求，用户没有提到的部分尽量保持原样，不要无故改动；
+2. 保留原有的结构（说话风格 / 情绪模式 / 高频表达 / 触发反应 / 禁止项）；
+3. 修改后全文不超过原提示词的 1.2 倍且不超过 2000 字，宁可精炼不要堆砌；
+4. 只输出修改后的提示词正文，不要解释，不要代码块，不要 Markdown 格式。
+用户昵称：{nickname}"""
+
+
+def render_template(template: str, **kwargs: Any) -> str:
+    """渲染提示词模板。
+
+    只做字面量替换，兼容 ``{key}`` 与 ``{{key}}`` 两种写法。
+    不使用 ``str.format``，避免用户自定义提示词中出现其它花括号时抛异常。
+    """
+    text = str(template) if template else ""
+    for key, value in kwargs.items():
+        value = "" if value is None else str(value)
+        text = text.replace("{{" + key + "}}", value).replace("{" + key + "}", value)
+    return text
+
 
 class ConfigNode:
 
@@ -142,9 +176,26 @@ class PluginConfig(ConfigNode):
     inject_prompt: bool
     entry_storage: list[dict[str, Any]]
 
+    # 新增配置项声明为可选，保证旧配置（尚未回填这两个字段）也能正常加载。
+    # 注意：这里不能写成带类级默认值的注解（merge_prompt: str | None = None），
+    # 否则属性查找会命中类属性，永远读不到配置里的真实值。
+    merge_prompt: str | None
+    edit_prompt: str | None
+
     _plugin_name: str = "astrbot_plugin_portrayal"
 
+    # 配置项缺失或为空时的回退文案
+    _PROMPT_DEFAULTS: dict[str, str] = {
+        "merge_prompt": DEFAULT_MERGE_PROMPT,
+        "edit_prompt": DEFAULT_EDIT_PROMPT,
+    }
+
     def __init__(self, cfg: AstrBotConfig, context: Context):
+        # 配置项缺失时回填进原始 config，取值与 WebUI 后续保存的行为保持一致
+        for key, default in self._PROMPT_DEFAULTS.items():
+            if not isinstance(cfg.get(key), str) or not cfg.get(key, "").strip():
+                cfg[key] = default
+
         super().__init__(cfg)
         self.context = context
 
@@ -154,6 +205,8 @@ class PluginConfig(ConfigNode):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.builtin_prompt_file = self.plugin_dir / "builtin_prompts.yaml"
         self.portrayal_file = self.data_dir / "portrayal.json"
+        # 机器人自身昵称/头像的全局备份（账号级，不能用会话级存储）
+        self.bot_identity_file = self.data_dir / "bot_identity.json"
 
     def get_provider(self, *, umo: str | None = None) -> Provider:
         provider = self.context.get_provider_by_id(
@@ -164,3 +217,11 @@ class PluginConfig(ConfigNode):
             raise RuntimeError("未配置用于文本生成任务的 LLM 提供商")
 
         return provider
+
+    def get_merge_prompt(self) -> str:
+        """获取克隆人格融合指令（配置为空时退回内置文案）"""
+        return (self.merge_prompt or "").strip() or DEFAULT_MERGE_PROMPT
+
+    def get_edit_prompt(self) -> str:
+        """获取人格改写指令（配置为空时退回内置文案）"""
+        return (self.edit_prompt or "").strip() or DEFAULT_EDIT_PROMPT

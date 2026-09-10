@@ -44,6 +44,8 @@ class EntryService:
         for item in data:
             if item["command"] in existed_commands:
                 continue
+            # 补齐可选字段，避免 PromptEntry 在校验时刷“缺少字段”告警
+            item.setdefault("need_admin", False)
             self.cfg.entry_storage.append(item)
             new_items.append(item)
             self.entries.append(PromptEntry(item))
