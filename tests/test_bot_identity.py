@@ -297,14 +297,25 @@ class FakeEvent:
         return ("plain", text)
 
 
+class FakeConv:
+    def __init__(self, origin, cid):
+        self.unified_msg_origin = origin
+        self.user_id = origin
+        self.conversation_id = cid
+
+
 class FakeConversationManager:
-    def __init__(self, cid="cid1"):
+    def __init__(self, cid="cid1", conversations=None):
         self.cid = cid
         self.persona_calls: list[tuple] = []
         self.history_cleared = 0
+        self._conversations = conversations or []
 
     async def get_curr_conversation_id(self, umo):
         return self.cid
+
+    async def get_conversations(self, unified_msg_origin=None, platform_id=None):
+        return list(self._conversations)
 
     async def update_conversation_persona_id(self, umo, pid):
         self.persona_calls.append((umo, pid))

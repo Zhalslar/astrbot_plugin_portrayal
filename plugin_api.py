@@ -83,6 +83,7 @@ class PluginPageAPI:
             ("/generate", "_generate", ["POST"]),
             ("/cache", "_cache_info", ["GET", "POST"]),
             ("/cached-users", "_cached_users", ["GET", "POST"]),
+            ("/ping", "_ping", ["GET", "POST"]),
         ]
         for route, handler_name, methods in routes:
             context.register_web_api(
@@ -239,6 +240,31 @@ class PluginPageAPI:
             logger.error(f"[面板] 读取候选失败：{e}", exc_info=True)
             return _error(f"读取候选失败：{e}")
         return _ok(data)
+
+    # ---------- 连通性自检 ----------
+
+    async def _ping(self, **_: Any):
+        """自检端点：回显插件看到的请求信息
+
+        用于排查「面板显示未找到该路由」到底卡在哪一层：与其它接口走完全相同的
+        路由前缀，所以能在浏览器里直接打开验证。不返回任何用户数据。
+        """
+        paths = []
+        try:
+            registered = getattr(self.plugin.context, "registered_web_apis", []) or []
+            paths = [r[0] for r in registered if isinstance(r, (tuple, list))]
+        except Exception:  # pragma: no cover
+            paths = []
+        return _ok(
+            {
+                "plugin": PLUGIN_NAME,
+                "request_path": request.path,
+                "query": dict(request.query),
+                "caller": request.username,
+                "registered": paths,
+            },
+            message="pong",
+        )
 
 
 def register_plugin_page_api(context, plugin: Any) -> PluginPageAPI:

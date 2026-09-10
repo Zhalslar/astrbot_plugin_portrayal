@@ -22,9 +22,14 @@ from .core.model import UserProfile
 from .core.persona_service import PersonaError, PersonaService
 from .plugin_api import register_plugin_page_api
 
-# 「改人格」的三种模式前缀
+# 「改人格」的三种模式前缀。
+# 全角冒号是中文输入法默认，但半角冒号（甚至空格）也很常见——用户写 `重置:xxx`
+# 时必须识别成重置模式，否则整段会被当成「LLM 改写要求」。
 APPEND_PREFIX = "追加："
 RESET_PREFIX = "重置："
+APPEND_KEYWORDS = ("追加", "append")
+RESET_KEYWORDS = ("重置", "reset")
+MODE_SEPARATORS = ("：", ":", " ", "\u3000", "\n", "\t")
 
 # 超出该长度时额外提示「不建议直接群发」
 MAX_SAFE_PROMPT_LEN = 2000
@@ -145,6 +150,43 @@ class PortrayalPlugin(Star):
                 return token, " ".join(tokens[index + 1 :]).strip()
         return "", ""
 
+    @staticmethod
+    def _parse_edit_mode(instruction: str) -> tuple[str, str] | None:
+        """识别「改人格」的模式
+
+        Returns:
+            (mode, payload)，mode 为 "append" / "reset" / "rewrite"；
+            payload 是去掉前缀后的正文。
+            分隔符接受全角/半角冒号、空格、制表符；「重置abc」这种没有分隔符的
+            写法**不**当作重置（避免误伤以「重置」开头的普通改写要求）。
+
+        返回 None 只表示「看起来想用前缀模式但格式不对」，调用方应提示用法，
+        以免把整段人格正文当成改写要求喂给 LLM。
+        """
+        text = (instruction or "").strip()
+        if not text:
+            return None
+
+        keywords = (
+            ("append", APPEND_KEYWORDS),
+            ("reset", RESET_KEYWORDS),
+        )
+        head = text[:6]
+        for mode, words in keywords:
+            for word in words:
+                if not head.lower().startswith(word):
+                    continue
+                rest = text[len(word) :]
+                if not rest:
+                    # 只有关键词，没有正文：交给调用方报「内容不能为空」
+                    return (mode, "")
+                stripped = rest.lstrip("".join(MODE_SEPARATORS))
+                if stripped != rest or rest[0] in MODE_SEPARATORS:
+                    return (mode, stripped.strip())
+                # 关键词后面直接接非分隔符字符：格式可疑，返回 None 让调用方提示
+                return None
+        return ("rewrite", text)
+
     # =========================
     # 查看画像
     # =========================
@@ -201,6 +243,28 @@ class PortrayalPlugin(Star):
             )
             return
         content = profile.clone_prompt.strip()
+
+        # 先说清「AstrBot 里现在到底是哪份内容」，便于判断切换是否生效
+        try:
+            live = None
+            for persona in await self.context.persona_manager.get_all_personas():
+                if getattr(persona, "persona_id", None) == profile.persona_id:
+                    live = persona
+                    break
+            if live is None:
+                state = "AstrBot 里还没有这份人格，需执行「切换人格 @群友」"
+            elif (live.system_prompt or "") == profile.clone_prompt:
+                state = "AstrBot 内内容与本地一致 ✅"
+            else:
+                state = (
+                    f"AstrBot 内内容与本地不一致 ⚠️"
+                    f"（AstrBot {len(live.system_prompt or '')} 字 / 本地 "
+                    f"{len(profile.clone_prompt)} 字，请重新执行「切换人格 @群友」）"
+                )
+        except Exception as e:
+            state = f"（读取 AstrBot 人格失败：{e}）"
+        yield event.plain_result(f"人格 ID：{profile.persona_id}\n{state}")
+
         yield event.plain_result(
             f"【{profile.nickname}】当前的克隆人格（{len(content)} 字）：\n"
             f"{content}"
@@ -384,11 +448,26 @@ class PortrayalPlugin(Star):
             yield event.plain_result("该用户在保护名单中，不允许修改")
             return
 
+        mode_payload = self._parse_edit_mode(instruction)
+
+        # 看起来想用「重置 / 追加」但格式不对时先提示用法，
+        # 避免把整段人格正文当成「改写要求」交给 LLM（白烧 token 还会改坏人格）
+        if mode_payload is None:
+            yield event.plain_result(
+                "没看懂这条修改要求：开头像是「重置 / 追加」模式，但格式不对。\n"
+                "正确写法（全角或半角冒号都行）：\n"
+                "  改人格 @群友 重置：<完整人格>\n"
+                "  改人格 @群友 追加：<补充文字>\n"
+                "  改人格 @群友 <修改要求>（交给 LLM 重写）\n"
+                "若确实想让 LLM 重写，请把开头的“重置/追加”去掉再发一次。"
+            )
+            return
+
         profile = self.db.get(target_id)
         is_new_profile = profile is None
 
         # 重置模式允许目标用户还没有档案：先拉取陌生人资料，再交给服务层写入
-        if is_new_profile and instruction.startswith(RESET_PREFIX):
+        if is_new_profile and mode_payload[0] == "reset":
             try:
                 info = await event.bot.get_stranger_info(
                     user_id=int(target_id), no_cache=True
@@ -399,26 +478,24 @@ class PortrayalPlugin(Star):
                 yield event.plain_result(f"获取该用户资料失败：{e}")
                 return
 
+        mode, payload = mode_payload
         try:
-            if instruction.startswith(APPEND_PREFIX):
+            if mode == "append":
                 result = self.persona_service.apply_edit(
-                    target_id,
-                    "append",
-                    instruction[len(APPEND_PREFIX) :],
-                    profile=profile,
+                    target_id, "append", payload, profile=profile
                 )
-            elif instruction.startswith(RESET_PREFIX):
+            elif mode == "reset":
                 # 目标还没有档案时（刚拉过陌生人资料）用 create 建档写入
                 result = self.persona_service.apply_edit(
                     target_id,
                     "create" if is_new_profile else "replace",
-                    instruction[len(RESET_PREFIX) :],
+                    payload,
                     profile=profile,
                 )
-            else:
+            else:  # rewrite：把整条指令当作「修改要求」交给 LLM
                 result = await self.persona_service.apply_rewrite(
                     target_id,
-                    instruction,
+                    payload,
                     umo=event.unified_msg_origin,
                     profile=profile,
                 )
@@ -599,6 +676,9 @@ class PortrayalPlugin(Star):
     async def switch_persona(self, event: AiocqhttpMessageEvent):
         """
         切换人格 @群友
+
+        人格是**会话级**绑定：只切当前会话，别的群不会跟着变
+        （哪个群要用，就在哪个群执行一次）。
         """
         ats = [
             str(seg.qq)
@@ -652,6 +732,7 @@ class PortrayalPlugin(Star):
         cid: str,
         force_applied_persona_id,
     ) -> str:
+        """把某个群友的人格切到当前会话，并同步机器人昵称/头像"""
         # 备份原始资料（全局唯一一份；绝不从当前账号反推头像）
         identity_warning, _captured = await self._capture_bot_identity(event, umo)
 

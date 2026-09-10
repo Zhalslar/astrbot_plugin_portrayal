@@ -349,6 +349,44 @@ def test_edit_persona(tmp: Path):
     check("保护名单被拒", any("保护名单" in t for _, t in out))
 
 
+def test_edit_mode_prefix(tmp: Path):
+    print("[改人格 模式前缀]")
+    plugin = make_plugin(None, tmp)
+    parse = plugin._parse_edit_mode
+
+    check("全角冒号 重置", parse("重置：abc") == ("reset", "abc"))
+    check("半角冒号 重置（回归）", parse("重置:abc") == ("reset", "abc"), str(parse("重置:abc")))
+    check("空格 重置", parse("重置 abc") == ("reset", "abc"))
+    check("全角空格 重置", parse("重置\u3000abc") == ("reset", "abc"))
+    check("全角冒号 追加", parse("追加：x") == ("append", "x"))
+    check("半角冒号 追加", parse("追加:x") == ("append", "x"))
+    check("冒号后带空格", parse("重置： abc ") == ("reset", "abc"))
+    check("多行正文", parse("重置：第一行\n第二行") == ("reset", "第一行\n第二行"))
+    check("前后缀无分隔符不认", parse("重置abc") is None)
+    check("普通改写要求走 rewrite", parse("说话更短一点") == ("rewrite", "说话更短一点"), str(parse("说话更短一点")))
+    check("只看关键词也判定", parse("重置 一下语气") == ("reset", "一下语气"))
+    check("空正文", parse("追加：") == ("append", ""))
+
+    # 端到端：半角冒号必须走「重置」（不进 LLM）
+    plugin2 = make_plugin(None, tmp)
+    plugin2.db.set(UserProfile(user_id="123", nickname="小明", clone_prompt="旧人格"))
+    captured = _fake_llm(plugin2, edit="不该被调用")
+    ev = FakeEvent("改人格 @用户 重置:半角冒号新人格", [Plain("改人格 "), At("123"), Plain(" 重置:半角冒号新人格")])
+    out = collect(plugin2.edit_persona(ev))
+    check("半角冒号 重置生效", plugin2.db.get("123").clone_prompt == "半角冒号新人格", str(out))
+    check("半角冒号 未调用 LLM", "edit" not in captured)
+
+    # 前缀写错时给出用法提示，且不改库
+    plugin3 = make_plugin(None, tmp)
+    plugin3.db.set(UserProfile(user_id="123", nickname="小明", clone_prompt="旧人格"))
+    captured3 = _fake_llm(plugin3, edit="不该被调用")
+    ev3 = FakeEvent("改人格 @用户 重置abc", [Plain("改人格 "), At("123"), Plain(" 重置abc")])
+    out3 = collect(plugin3.edit_persona(ev3))
+    check("前缀写错时提示用法", any("正确写法" in t for _, t in out3), str(out3))
+    check("前缀写错时不改库", plugin3.db.get("123").clone_prompt == "旧人格")
+    check("前缀写错时不调 LLM", "edit" not in captured3)
+
+
 def test_view_clone(tmp: Path):
     print("[查看克隆]")
     plugin = make_plugin(None, tmp)
@@ -373,7 +411,8 @@ def test_view_clone(tmp: Path):
     )
     out = collect(plugin.view_clone(FakeEvent("查看克隆 @u", [At("777")])))
     check("超长有提示", any("不建议直接群发全文" in t for _, t in out))
-    check("超长正文已 strip", out[0][1].endswith("长" * 10))
+    body = [t for _, t in out if "当前的克隆人格" in t]
+    check("超长正文已 strip", bool(body) and body[0].rstrip().endswith("长" * 10), str(len(body)))
 
 
 def test_portrait_merge(tmp: Path):
@@ -659,6 +698,7 @@ def main():
     test_config_fallbacks(tmp)
     test_parsing(tmp)
     test_edit_persona(tmp)
+    test_edit_mode_prefix(tmp)
     test_view_clone(tmp)
     test_portrait_merge(tmp)
     test_llm_prompt_builders(tmp)

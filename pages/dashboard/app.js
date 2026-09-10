@@ -9,6 +9,18 @@
   var PAGE_SIZE = 50;
 
   // ---------------------------------------------------------------- bridge
+  // 运行期插件名优先（宿主 context 里带），退回常量
+  function pluginName() {
+    try {
+      var api = window.AstrBotPluginPage;
+      var ctx = api && typeof api.getContext === "function" ? api.getContext() : null;
+      if (ctx && typeof ctx.pluginName === "string" && ctx.pluginName) return ctx.pluginName;
+    } catch (e) {
+      /* 忽略，用常量兜底 */
+    }
+    return PLUGIN;
+  }
+
   function bridge() {
     var api = window.AstrBotPluginPage;
     if (!api || typeof api.apiGet !== "function") {
@@ -28,7 +40,7 @@
 
   var api = {
     overview: function () {
-      return bridge().apiGet(PLUGIN + "/overview").then(unwrap("读取总览失败"));
+      return bridge().apiGet(pluginName() + "/overview").then(unwrap("读取总览失败"));
     },
     users: function (params) {
       var q = {};
@@ -37,23 +49,23 @@
         if (v === "" || v === null || v === undefined || v === false) return;
         q[k] = v === true ? "1" : String(v);
       });
-      return bridge().apiGet(PLUGIN + "/users", q).then(unwrap("读取列表失败"));
+      return bridge().apiGet(pluginName() + "/users", q).then(unwrap("读取列表失败"));
     },
     user: function (uid) {
-      return bridge().apiGet(PLUGIN + "/user/" + encodeURIComponent(uid)).then(unwrap("读取档案失败"));
+      return bridge().apiGet(pluginName() + "/user/" + encodeURIComponent(uid)).then(unwrap("读取档案失败"));
     },
     update: function (uid, mode, content) {
       return bridge()
-        .apiPost(PLUGIN + "/update", { user_id: uid, mode: mode, content: content })
+        .apiPost(pluginName() + "/update", { user_id: uid, mode: mode, content: content })
         .then(unwrap("保存失败"));
     },
     generate: function (uid, mode) {
       return bridge()
-        .apiPost(PLUGIN + "/generate", { user_id: uid, mode: mode })
+        .apiPost(pluginName() + "/generate", { user_id: uid, mode: mode })
         .then(unwrap("生成失败"));
     },
     cachedUsers: function () {
-      return bridge().apiGet(PLUGIN + "/cached-users").then(unwrap("读取缓存候选失败"));
+      return bridge().apiGet(pluginName() + "/cached-users").then(unwrap("读取缓存候选失败"));
     },
   };
 
@@ -195,6 +207,18 @@
     console.error(err);
   };
 
+  // 插件刚重载完成时接口可能短暂不可用，自动退避重试
+  function withRetry(fn, attempts, delay) {
+    return fn().catch(function (err) {
+      if (attempts <= 1) throw err;
+      return new Promise(function (resolve) {
+        setTimeout(resolve, delay || 700);
+      }).then(function () {
+        return withRetry(fn, attempts - 1, (delay || 700) * 2);
+      });
+    });
+  }
+
   App.prototype.load = function () {
     var self = this;
     this.state.loading = true;
@@ -202,7 +226,14 @@
     Promise.resolve()
       .then(function () {
         // 分别取数：一部分失败不影响另一部分渲染
-        return Promise.allSettled([api.overview(), api.users(self.userParams())]);
+        return Promise.allSettled([
+          withRetry(function () {
+            return api.overview();
+          }, 3),
+          withRetry(function () {
+            return api.users(self.userParams());
+          }, 3),
+        ]);
       })
       .then(function (results) {
         var failures = [];
