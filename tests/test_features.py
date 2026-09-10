@@ -182,7 +182,7 @@ def _persona_entry(plugin):
             async for item in plugin.switch_persona(event):
                 yield item
             return
-        name = plugin._persona_arg(event.message_str)
+        name = plugin._persona_arg(event.message_str, event.get_messages())
         if not name:
             yield event.plain_result("命令格式测试")
             return
@@ -509,6 +509,33 @@ def test_switch_named_persona(tmp: Path):
     check("解析带引号", plugin._persona_arg("切换人格 「岑知秋」") == "岑知秋")
     check("无参数返回空", plugin._persona_arg("切换人格") == "")
 
+    # 回归：引用消息会把引用段渲染进 message_str（[MSG_ID:...]），
+    # 之前它被当成名字的一部分，导致「明明名字对却说没找到」
+    check(
+        "引用残留被剔除",
+        plugin._persona_arg("切换人格 岑知秋 [MSG_ID:1452650487]") == "岑知秋",
+        plugin._persona_arg("切换人格 岑知秋 [MSG_ID:1452650487]"),
+    )
+    check(
+        "引用前缀+残留都被剔除",
+        plugin._persona_arg(
+            "[引用消息(幻: x)] 切换人格 宵宫 [MSG_ID:-443483943]",
+            [Plain("[引用消息(幻: x)] 切换人格 宵宫 [MSG_ID:-443483943]")],
+        )
+        == "宵宫",
+    )
+    check(
+        "图片残留被剔除",
+        plugin._persona_arg("切换人格 苏晴 [图片]") == "苏晴",
+        plugin._persona_arg("切换人格 苏晴 [图片]"),
+    )
+    check(
+        "消息链优先且能跳过 At",
+        plugin._persona_arg("切换人格 陈舟", [At("10000"), Plain(" 切换人格 陈舟")])
+        == "陈舟",
+    )
+    check("全角空格也能切", plugin._persona_arg("切换人格\u3000岑知秋") == "岑知秋")
+
     # 匹配
     rows = [("岑知秋", "x", "AstrBot"), ("宵宫", "y", "AstrBot"), ("岑知夏", "z", "AstrBot")]
     check("精确匹配", len(plugin._match_persona("岑知秋", rows)) == 1)
@@ -546,6 +573,20 @@ def test_switch_named_persona(tmp: Path):
     check("克隆来源标注", "来源：群员克隆" in out2[0][1], out2[0][1])
     check("克隆也把昵称改成 ID", bot2.nickname == "小明_123", str(bot2.nickname))
     check("克隆不提示无头像", "没有对应的群友头像可用" not in out2[0][1])
+
+    # 端到端：引用消息里的名字必须能切（之前这里会报「没找到人格」）
+    bot_ref = FakeBot(nickname="真机器人", user_id="999")
+    ev_ref = FakeEvent(
+        "[引用消息(x)] 切换人格 岑知秋 [MSG_ID:1452650487]",
+        [Plain("[引用消息(x)] 切换人格 岑知秋 [MSG_ID:1452650487]")],
+        bot=bot_ref,
+    )
+    out_ref = collect(plugin.switch_named_persona_entry(ev_ref))
+    check(
+        "引用消息里也能切人格",
+        "已把当前会话切到人格【岑知秋】" in out_ref[0][1],
+        out_ref[0][1],
+    )
 
     # 找不到时给出候选
     ev3 = FakeEvent("切换人格 不存在的人", [Plain("切换人格 不存在的人")])

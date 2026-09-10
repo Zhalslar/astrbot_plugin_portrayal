@@ -717,7 +717,7 @@ class PortrayalPlugin(Star):
 
         # 不含 @时，按「人格名 / 人格 ID」处理
         if not ats:
-            name = self._persona_arg(event.message_str)
+            name = self._persona_arg(event.message_str, event.get_messages())
             if not name:
                 yield event.plain_result(
                     "命令格式：\n"
@@ -768,12 +768,44 @@ class PortrayalPlugin(Star):
     # ---------- 切到任意人格 ----------
 
     @staticmethod
-    def _persona_arg(message_str: str) -> str:
-        """从 `切换人格 xxx` 里取出人格名/ID"""
-        parts = (message_str or "").strip().split(maxsplit=1)
-        if len(parts) < 2:
-            return ""
-        return parts[1].strip().strip("「」\"'")
+    @staticmethod
+    def _clean_persona_arg(raw: str) -> str:
+        """清洗人格名：去掉引用/图片等渲染残留
+
+        引用消息时 event.message_str 会把引用段渲染成 `[MSG_ID:123]` 之类，
+        直接当成人格名就会出现「明明名字对却说没找到」。
+        """
+        import re
+
+        text = str(raw or "")
+        text = re.sub(r"\[CQ:[^\]]*\]", " ", text)
+        text = re.sub(r"\[[^\]]{0,60}\]", " ", text)
+        text = text.replace("\u200b", "").replace("\ufeff", "")
+        return text.strip().strip("「」\"'“”")
+
+    @classmethod
+    def _persona_arg(cls, message_str: str, chain: list | None = None) -> str:
+        """从 `切换人格 xxx` 里取出人格名/ID
+
+        优先用消息链里的**纯文本段**：能天然排除 At 段与引用段，
+        避免 `[MSG_ID:...]` 之类的渲染残留混进人格名（实测踩到的坑）。
+        """
+        for seg in chain or []:
+            if type(seg).__name__ != "Plain":
+                continue
+            text = cls._clean_persona_arg(getattr(seg, "text", "") or "")
+            if "切换人格" not in text:
+                continue
+            rest = cls._clean_persona_arg(text.split("切换人格", 1)[1])
+            if rest:
+                return rest
+
+        # 退回文本解析（同样先去掉残留）
+        text = cls._clean_persona_arg(message_str)
+        if "切换人格" in text:
+            return cls._clean_persona_arg(text.split("切换人格", 1)[1])
+        parts = text.split(maxsplit=1)
+        return cls._clean_persona_arg(parts[1]) if len(parts) > 1 else ""
 
     async def _list_all_personas(self) -> list[tuple[str, str, str]]:
         """列出可切的人格：[(persona_id, 摘要, 来源)]"""
