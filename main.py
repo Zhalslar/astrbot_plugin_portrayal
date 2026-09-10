@@ -823,7 +823,11 @@ class PortrayalPlugin(Star):
     async def _switch_named_persona(
         self, event: AiocqhttpMessageEvent, name: str
     ) -> str:
-        """按名字/ID 切到任意已有人格（不改机器人昵称头像）"""
+        """按名字/ID 切到任意已有人格
+
+        - 机器人昵称会改成该人格 ID（和「切换人格 @群友」一致，方便一眼看出当前在演谁）
+        - **头像不动**：非群员克隆时没有来源头像可用，拿 QQ 号去猜会把之前串掉的状态带回来
+        """
         chosen_id = ""
         chosen_prompt = ""
         source = "AstrBot"
@@ -868,6 +872,9 @@ class PortrayalPlugin(Star):
             return "当前没有对话，请先开始对话或使用 /new 创建一个对话。"
 
         async with self._identity_lock_for():
+            # 先把机器人原始资料备份好（以后「恢复人格」要用；已备份过则不动）
+            identity_warning, _captured = await self._capture_bot_identity(event, umo)
+
             if chosen_prompt:
                 try:
                     await self.context.persona_manager.update_persona(
@@ -884,13 +891,27 @@ class PortrayalPlugin(Star):
                 umo, cid, history=[]
             )
 
+            # 昵称改成人格 ID；头像保持不变
+            nickname_error = await self._sync_qq_nickname(event, chosen_id)
+            self.identity.mark_worn(
+                nickname=chosen_id,
+                umo=umo,
+                owner=(cloned.user_id if cloned is not None else ""),
+            )
+
         msg = (
-            f"已把当前会话切到人格【{chosen_id}】（来源：{source}），对话历史已清空。\n"
-            f"恢复默认人格请发送：恢复人格"
+            f"已把当前会话切到人格【{chosen_id}】（来源：{source}），对话历史已清空。"
+            f"\n机器人昵称已改为【{chosen_id}】；头像未改动。"
+            f"\n恢复默认人格请发送：恢复人格"
         )
         if cloned is None:
-            msg += "\n（该人格不是群员克隆，机器人的 QQ 昵称/头像保持不变）"
+            msg += "（该人格不是群员克隆，没有对应的群友头像可用）"
+        if nickname_error:
+            msg += f"\n⚠️ {nickname_error}"
+        if identity_warning:
+            msg += f"\n⚠️ {identity_warning}"
         return msg
+
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("人格列表")

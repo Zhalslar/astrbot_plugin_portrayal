@@ -56,9 +56,11 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 
 # ---------------------------------------------------------------- fake event
 class FakeBot:
-    def __init__(self):
+    def __init__(self, nickname: str = "bot", user_id: str = "10000"):
         self.calls: list[tuple] = []
         self.stranger_error: Exception | None = None
+        self.nickname = nickname
+        self.user_id = user_id
 
     async def get_stranger_info(self, user_id, no_cache=False):
         self.calls.append(("get_stranger_info", user_id))
@@ -67,10 +69,11 @@ class FakeBot:
         return {"nickname": f"用户{user_id}", "sex": "男"}
 
     async def get_login_info(self):
-        return {"user_id": "10000", "nickname": "bot"}
+        return {"user_id": self.user_id, "nickname": self.nickname}
 
     async def set_qq_profile(self, nickname=""):
         self.calls.append(("set_qq_profile", nickname))
+        self.nickname = nickname
 
     async def set_qq_avatar(self, file=""):
         self.calls.append(("set_qq_avatar", file))
@@ -83,13 +86,14 @@ class FakeEvent:
         chain: list,
         is_admin: bool = True,
         self_id: str = "10000",
+        bot: "FakeBot | None" = None,
     ):
         self.message_str = message_str
         self._chain = chain
         self._is_admin = is_admin
         self._self_id = self_id
         self.unified_msg_origin = "aiocqhttp:GroupMessage:999"
-        self.bot = FakeBot()
+        self.bot = bot or FakeBot()
 
     def get_messages(self):
         return self._chain
@@ -515,19 +519,33 @@ def test_switch_named_persona(tmp: Path):
 
     # 切到 AstrBot 自带人格
     ev = FakeEvent("切换人格 岑知秋", [Plain("切换人格 岑知秋")])
+    bot = FakeBot(nickname="真机器人", user_id="999")
+    ev = FakeEvent("切换人格 岑知秋", [Plain("切换人格 岑知秋")], bot=bot)
     out = collect(plugin.switch_named_persona_entry(ev))
     text = out[0][1]
     check("切换成功提示", "已把当前会话切到人格【岑知秋】" in text, text)
     check("标明来源是 AstrBot", "来源：AstrBot" in text, text)
-    check("未改动机器人资料有说明", "昵称/头像保持不变" in text, text)
+    check("昵称改为该人格 ID", bot.nickname == "岑知秋", str(bot.nickname))
+    check("回执说明昵称已改", "机器人昵称已改为【岑知秋】" in text, text)
+    check("回执说明头像未改", "头像未改动" in text, text)
+    check(
+        "头像未被上传（非克隆无来源头像）",
+        [c for c in bot.calls if c[0] == "set_qq_avatar"] == [],
+        str([c for c in bot.calls if c[0] == "set_qq_avatar"]),
+    )
+    check("备份了机器人原始昵称", plugin.identity.load().nickname == "真机器人",
+          str(plugin.identity.load().nickname))
+    check("登记了占用（便于恢复）", plugin.identity.load().worn != {})
     check("会话已切到该人格", ctx.conversation_manager.persona_calls[-1][1] == "岑知秋")
     check("清空了历史", ctx.conversation_manager.history_cleared >= 1)
 
     # 切到群员克隆（来自本插件）时来源标注为克隆
-    ev2 = FakeEvent("切换人格 小明_123", [Plain("切换人格 小明_123")])
+    bot2 = FakeBot(nickname="真机器人", user_id="999")
+    ev2 = FakeEvent("切换人格 小明_123", [Plain("切换人格 小明_123")], bot=bot2)
     out2 = collect(plugin.switch_named_persona_entry(ev2))
     check("克隆来源标注", "来源：群员克隆" in out2[0][1], out2[0][1])
-    check("克隆不再提示不改资料", "昵称/头像保持不变" not in out2[0][1])
+    check("克隆也把昵称改成 ID", bot2.nickname == "小明_123", str(bot2.nickname))
+    check("克隆不提示无头像", "没有对应的群友头像可用" not in out2[0][1])
 
     # 找不到时给出候选
     ev3 = FakeEvent("切换人格 不存在的人", [Plain("切换人格 不存在的人")])
