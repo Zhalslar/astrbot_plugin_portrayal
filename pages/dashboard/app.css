@@ -617,3 +617,29 @@ body {
     opacity: 0;
     transform: translateX(12px);
 }
+
+/* ---------------- 加载失败提示条 ---------------- */
+
+.notice-host:empty {
+    display: none;
+}
+
+.notice {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    background: var(--err-soft);
+    border: 1px solid var(--err);
+    border-radius: var(--radius);
+    padding: 9px 12px;
+    margin-bottom: 14px;
+}
+
+.notice-text {
+    flex: 1;
+    min-width: 200px;
+    font-size: 12.5px;
+    color: var(--err);
+    word-break: break-word;
+}

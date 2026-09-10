@@ -394,6 +394,8 @@ class PersonaService:
 
         target.clone_prompt = content
         target.persona_updated_at = int(time.time())
+        # 面板生成的人格同样刷新画像时间，避免面板把刚生成的档案标成「画像过期」
+        target.timestamp = target.persona_updated_at
         self.db.set(target)
         logger.info(f"[面板] 已为 {target.nickname}({user_id}) 生成克隆人格（{mode}）")
         return GenerateResult(

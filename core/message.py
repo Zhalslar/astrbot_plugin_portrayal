@@ -202,7 +202,8 @@ class MessageManager:
             if now - cached.timestamp > ttl:
                 continue
             group_id, sep, user_id = key.rpartition(":")
-            if not sep or not user_id:
+            if not sep or not user_id.isdigit():
+                # 面板建档要求纯数字 QQ 号，过滤掉其它形态的 id
                 continue
             item = buckets.setdefault(
                 user_id, {"user_id": user_id, "messages": 0, "groups": 0}

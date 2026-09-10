@@ -22,7 +22,7 @@
     var raw = (err && err.message) || "";
     var ascii = raw.replace(/[^\x20-\x7E]/g, "").trim();
     if (!raw) return fallback;
-    if (ascii.length < 8) return fallback + "（" + raw + "）";
+    if (ascii.length < 8) return fallback + (raw ? "（" + raw + "）" : "");
     return raw;
   }
 
@@ -144,6 +144,7 @@
       pager: document.querySelector("[data-pager]"),
       toasts: document.querySelector("[data-toasts]"),
       cached: document.querySelector("[data-cached]"),
+      notice: document.querySelector("[data-notice]"),
     };
     this.state = {
       limits: { max_safe_len: 2000 },
@@ -198,26 +199,79 @@
     var self = this;
     this.state.loading = true;
     self.status("加载中…");
-    return Promise.all([api.overview(), api.users(this.userParams())])
-      .then(function (out) {
-        var overview = out[0] || {};
-        var users = out[1] || {};
-        self.state.stats = overview.stats || {};
-        self.state.config = overview.config || {};
-        self.state.entries = overview.entry_commands || [];
-        self.state.limits = overview.limits || { max_safe_len: 2000 };
-        self.state.users = users.users || [];
-        self.state.total = users.total || 0;
-        self.clampOffset();
-        self.renderAll();
-        self.status("就绪", "ok");
+    Promise.resolve()
+      .then(function () {
+        // 分别取数：一部分失败不影响另一部分渲染
+        return Promise.allSettled([api.overview(), api.users(self.userParams())]);
+      })
+      .then(function (results) {
+        var failures = [];
+        var overview = results[0].status === "fulfilled" ? results[0].value : null;
+        var users = results[1].status === "fulfilled" ? results[1].value : null;
+        if (results[0].status === "rejected") failures.push("总览：" + errText(results[0].reason, "接口无响应"));
+        if (results[1].status === "rejected") failures.push("列表：" + errText(results[1].reason, "接口无响应"));
+
+        if (overview) {
+          self.state.stats = overview.stats || {};
+          self.state.config = overview.config || {};
+          self.state.entries = overview.entry_commands || [];
+          self.state.limits = overview.limits || { max_safe_len: 2000 };
+        }
+        if (users) {
+          self.state.users = users.users || [];
+          self.state.total = users.total || 0;
+          self.clampOffset();
+        }
+
+        // 渲染出错不要伪装成「接口出错」
+        try {
+          self.renderAll();
+        } catch (renderErr) {
+          console.error("面板渲染失败", renderErr);
+          failures.push("页面渲染：" + errText(renderErr, "渲染异常"));
+        }
+
+        if (failures.length) {
+          self.status("部分数据加载失败", "error");
+          failures.forEach(function (f) {
+            self.toast(f, "error");
+          });
+          self.showLoadError(failures.join("；"));
+        } else {
+          self.status("就绪", "ok");
+          self.clearNotice();
+        }
+        self.state.loading = false;
       })
       .catch(function (err) {
-        self.fail(err, "加载面板数据失败");
-      })
-      .then(function () {
         self.state.loading = false;
+        self.fail(err, "加载面板数据失败");
       });
+  };
+
+  // 顶部提示条：明确显示失败原因，并提供重试
+  App.prototype.showLoadError = function (detail) {
+    var self = this;
+    var host = this.el.notice;
+    if (!host) return;
+    clear(host);
+    host.appendChild(
+      el("div", { class: "notice" }, [
+        el("span", { class: "notice-text", text: "面板数据加载失败：" + detail }),
+        el("button", {
+          class: "btn",
+          text: "重试",
+          onclick: function () {
+            self.load();
+            self.loadCachedUsers();
+          },
+        }),
+      ])
+    );
+  };
+
+  App.prototype.clearNotice = function () {
+    if (this.el.notice) clear(this.el.notice);
   };
 
   App.prototype.userParams = function () {
@@ -808,6 +862,7 @@
     app.el.pager = document.querySelector("[data-pager]");
     app.el.toasts = document.querySelector("[data-toasts]");
     app.el.cached = document.querySelector("[data-cached]");
+    app.el.notice = document.querySelector("[data-notice]");
 
     var search = document.querySelector("[data-search]");
     if (search) {

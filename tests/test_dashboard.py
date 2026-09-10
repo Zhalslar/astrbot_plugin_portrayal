@@ -542,6 +542,35 @@ def test_db_write_safety(tmp: Path):
     reloaded_bom = type(plugin.db)(plugin.cfg)
     check("BOM 文件可加载", reloaded_bom.get("5") is not None, str(reloaded_bom._data))
 
+    # IO 类读取失败：不得改名、不得让下一次写入覆盖磁盘上的文件
+    plugin.db.file.write_text(
+        json.dumps({"7": {"user_id": "7", "nickname": "庚"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    good_text = plugin.db.file.read_text(encoding="utf-8")
+    if bad_path.exists():
+        bad_path.unlink()
+
+    real_read_text = type(plugin.db.file).read_text
+
+    def boom(self, *a, **k):
+        raise OSError("file is locked by another process")
+
+    type(plugin.db.file).read_text = boom
+    try:
+        degraded = type(plugin.db)(plugin.cfg)
+    finally:
+        type(plugin.db.file).read_text = real_read_text
+    check("IO 失败时标记为降级", degraded.degraded is True)
+    check("IO 失败时不返回旧数据", degraded._data == {})
+    check("IO 失败时文件仍在原处", plugin.db.file.exists() and not bad_path.exists())
+    check("IO 失败时文件内容未被改动", plugin.db.file.read_text(encoding="utf-8") == good_text)
+    degraded.set(UserProfile(user_id="8", nickname="辛"))
+    check(
+        "降级时禁止写盘",
+        plugin.db.file.read_text(encoding="utf-8") == good_text,
+    )
+
     # 未知字段的档案（老版本 / 手改）也不应让整份加载失败
     plugin.db.file.write_text(
         json.dumps(
@@ -581,6 +610,7 @@ def test_page_assets_exist():
         "data-detail",
         "data-pager",
         "data-toasts",
+        "data-notice",
     ):
         check(f"index.html 含 {attr}", attr in html)
         check(f"app.js 引用 {attr}", attr in js)
